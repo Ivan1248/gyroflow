@@ -38,6 +38,9 @@ android *param:
 ios *param:
     just -f _scripts/ios.just {{param}}
 
+arch *param:
+    just -f _scripts/arch.just {{param}}
+
 publish version:
     #!/bin/bash
     git clone --depth 1 git@github.com:gyroflow/gyroflow.git __publish
