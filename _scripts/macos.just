@@ -55,8 +55,8 @@ install-deps:
     if [ ! -f "{{OpenCVPath}}/lib/libopencv_core4.a" ]; then
         echo "Installing OpenCV from vcpkg"
         # Install OpenCV
-        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics]:x64-osx" --cmake-args=-DVCPKG_BUILD_TYPE=release
-        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics]:arm64-osx" --cmake-args=-DVCPKG_BUILD_TYPE=release
+        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics,imgcodecs,png]:x64-osx" --cmake-args=-DVCPKG_BUILD_TYPE=release
+        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics,imgcodecs,png]:arm64-osx" --cmake-args=-DVCPKG_BUILD_TYPE=release
         rm -rf ./vcpkg/buildtrees
         rm -rf ./vcpkg/downloads
     fi
@@ -145,7 +145,7 @@ deploy *param:
         pushd $PROJECT_DIR
 
         export PATH="$PROJECT_DIR/ext/{{QtVersion}}/macos/bin:$PATH"
-        export OPENCV_LINK_LIBS="opencv_core4,opencv_calib3d4,opencv_features2d4,opencv_imgproc4,opencv_video4,opencv_flann4,opencv_stitching4"
+        export OPENCV_LINK_LIBS="opencv_core4,opencv_calib3d4,opencv_features2d4,opencv_imgproc4,opencv_video4,opencv_flann4,opencv_stitching4,opencv_imgcodecs4,png"
 
         #export DYLD_FALLBACK_LIBRARY_PATH="$(xcode-select --print-path)/usr/lib/"
         export DYLD_FALLBACK_LIBRARY_PATH="$(xcode-select --print-path)/Toolchains/XcodeDefault.xctoolchain/usr/lib/"
