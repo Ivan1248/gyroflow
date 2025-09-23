@@ -98,6 +98,66 @@ impl OpticalFlowTrait for OFOpenCVPyrLK {
                         }
                     }
                 }
+
+                // Debug: Save frames with PyrLK centers and displacement vectors if environment variable is set
+                if std::env::var("GYROFLOW_DEBUG_PYRLK").is_ok() {
+                    let debug_dir = "debug_frames";
+                    if let Err(e) = std::fs::create_dir_all(debug_dir) {
+                        log::error!("Failed to create debug directory: {}", e);
+                    }
+                    
+                    // Create frame 1 with centers and displacement vectors
+                    let mut frame1_debug = (*self.img).clone();
+                    
+                    // Draw PyrLK centers and displacement vectors on frame 1
+                    for ((x_a, y_a), (x_b, y_b)) in pts1.iter().zip(pts2.iter()) {
+                        let center_x = *x_a as u32;
+                        let center_y = *y_a as u32;
+                        
+                        if center_x < frame1_debug.width() && center_y < frame1_debug.height() {
+                            // Draw center point (white cross)
+                            for dx in -1..=1 {
+                                for dy in -1..=1 {
+                                    let px = (center_x as i32 + dx).max(0) as u32;
+                                    let py = (center_y as i32 + dy).max(0) as u32;
+                                    if px < frame1_debug.width() && py < frame1_debug.height() {
+                                        let pixel = frame1_debug.get_pixel_mut(px, py);
+                                        *pixel = image::Luma([255]); // White cross
+                                    }
+                                }
+                            }
+                            
+                            // Draw displacement vector (white line)
+                            let end_x = *x_b as u32;
+                            let end_y = *y_b as u32;
+                            
+                            if end_x < frame1_debug.width() && end_y < frame1_debug.height() {
+                                // Simple line drawing using Bresenham-like algorithm
+                                let dx = (end_x as i32 - center_x as i32).abs();
+                                let dy = (end_y as i32 - center_y as i32).abs();
+                                let steps = dx.max(dy) as usize;
+                                
+                                if steps > 0 {
+                                    for step in 0..=steps {
+                                        let t = step as f32 / steps as f32;
+                                        let line_x = (center_x as f32 + t * (end_x as f32 - center_x as f32)) as u32;
+                                        let line_y = (center_y as f32 + t * (end_y as f32 - center_y as f32)) as u32;
+                                        
+                                        if line_x < frame1_debug.width() && line_y < frame1_debug.height() {
+                                            let pixel = frame1_debug.get_pixel_mut(line_x, line_y);
+                                            *pixel = image::Luma([255]); // White line
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    let frame1_debug_path = format!("{}/pyrlk_frame_{:06}_debug.png", debug_dir, self.timestamp_us);
+                    if let Err(e) = frame1_debug.save(&frame1_debug_path) {
+                        log::error!("Failed to save PyrLK debug frame: {} - {}", frame1_debug_path, e);
+                    }
+                }
                 Ok((pts1, pts2))
             }();
             
