@@ -151,7 +151,7 @@ impl SmoothingAlgorithm for MotionDirection {
             // Use try_read to avoid blocking the UI thread
             if let Some(sync_results) = compute_params.pose_estimator.sync_results.try_read() {
                 let count = sync_results.len();
-                let has_motion = sync_results.values().any(|fr| fr.translation_dir_cam.is_some());
+                let has_motion = sync_results.values().any(|fr| fr.transl_dir.is_some());
                 println!("MotionDirection::smooth() got sync_results lock, {} frames, has_motion: {}", count, has_motion);
                 has_motion
             } else {
@@ -179,7 +179,7 @@ impl SmoothingAlgorithm for MotionDirection {
         let motion_data_map: std::collections::BTreeMap<i64, ([f64; 3], PoseQuality)> = if let Some(sync_results) = compute_params.pose_estimator.sync_results.try_read() {
             sync_results.iter()
                 .filter_map(|(ts, fr)| {
-                    if let Some(tdir) = fr.translation_dir_cam {
+                    if let Some(tdir) = fr.transl_dir {
                         let quality = fr.pose_quality.clone().unwrap_or_default();
                         Some((*ts, (tdir, quality)))
                     } else {
@@ -222,7 +222,7 @@ impl SmoothingAlgorithm for MotionDirection {
             
             // Find averaged motion data within the window (match visualization semantics)
             let window_vis_us: i64 = 50_000 * 20; // 1s window, same as visualization
-            let cam_dir_opt: Option<nalgebra::Vector3<f64>> = if let Some((tdir, _qual)) = compute_params.pose_estimator.get_translation_dir_cam_near(*ts, window_vis_us, true) {
+            let cam_dir_opt: Option<nalgebra::Vector3<f64>> = if let Some((tdir, _qual)) = compute_params.pose_estimator.get_transl_dir_near(*ts, window_vis_us, true) {
                 let vec = nalgebra::Vector3::new(tdir[0], tdir[1], tdir[2]);
                 if vec.norm() > 1e-9 { Some(vec) } else { None }
             } else {

@@ -383,6 +383,7 @@ impl Controller {
         QString::from(self.stabilizer.input_file.read().project_file_url.as_ref().cloned().unwrap_or_default())
     }
 
+    // Overlaps with RenderQueue::do_autosync, TODO: refactor
     fn start_autosync(&mut self, timestamps_fract: String, sync_params: String, mode: String) {
         rendering::clear_log();
 

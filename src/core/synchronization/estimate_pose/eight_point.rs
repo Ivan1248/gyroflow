@@ -46,7 +46,7 @@ impl EstimateRelativePoseTrait for PoseEightPoint {
                 let tdir = if t.norm() > 0.0 { Some(nalgebra::Unit::new_normalize(nalgebra::Vector3::new(t.x, t.y, t.z))) } else { None };
                 return Some(RelativePose {
                     rotation: nalgebra::Rotation3::from_matrix_unchecked(nalgebra::Matrix3::from_column_slice(rot.matrix().as_slice())),
-                    translation_dir_cam: tdir,
+                    transl_dir: tdir,
                     inlier_ratio: None,
                     median_epi_err: None,
                 });

@@ -58,7 +58,7 @@ impl<'a> Converter {
         Ok(())
     }
 
-    // Scale is only used for autosync
+    // Downscaling for performance optimization in relative pose estimation (autosync), and thumbnail generation
     pub fn scale(&mut self, frame: &mut frame::Video, format: format::Pixel, width: u32, height: u32) -> Result<frame::Video, FFmpegError> {
         if frame.width() != width || frame.height() != height || frame.format() != format {
             if self.sw_frame_converted.is_none() {

@@ -102,7 +102,7 @@ pub struct FrameResult {
     pub rotation: Option<Rotation3<f64>>,
     pub quat: Option<Quat64>,
     pub euler: Option<(f64, f64, f64)>,
-    pub translation_dir_cam: Option<[f64; 3]>,
+    pub transl_dir: Option<[f64; 3]>,
     pub pose_quality: Option<PoseQuality>,
 
     optical_flow: RefCell<BTreeMap<usize, OpticalFlowPairWithTs>>
@@ -141,7 +141,7 @@ impl PoseEstimator {
                 rotation: None,
                 quat: None,
                 euler: None,
-                translation_dir_cam: None,
+                transl_dir: None,
                 pose_quality: None,
                 optical_flow: Default::default()
             };
@@ -157,8 +157,10 @@ impl PoseEstimator {
             .collect()
     }
 
+    /// Computes camera motion between unprocessed consecutive frames using optical flow and pose estimation.
     pub fn process_detected_frames(&self, fps: f64, scaled_fps: f64, params: &ComputeParams) {
         let every_nth_frame = self.every_nth_frame.load(SeqCst) as f64;
+        // Find unprocessed consecutive frame pairs
         let mut frames_to_process = Vec::new();
         {
             let l = self.sync_results.read();
@@ -171,9 +173,8 @@ impl PoseEstimator {
             }
         }
 
-        let results = self.sync_results.clone();
-        let cfg_str = self.pose_config.read().clone();
-        let cfg = match cfg_str.as_str() {
+        // Set up relative pose estimation
+        let cfg = match self.pose_config.read().clone().as_str() {
             "EssentialLMEDS" => PoseMethodKind::EssentialLMEDS,
             "EssentialRANSAC" => PoseMethodKind::EssentialRANSAC,
             "Almeida" => PoseMethodKind::Almeida,
@@ -183,6 +184,7 @@ impl PoseEstimator {
         };
         let mut pose = crate::synchronization::estimate_pose::RelativePoseMethod::from(&cfg);
         pose.init(params);
+        let results = self.sync_results.clone();
         frames_to_process.par_iter().for_each(move |(ts, next_ts)| {
             {
                 let l = results.read();
@@ -197,16 +199,17 @@ impl PoseEstimator {
                             // Unlock the mutex for estimate_pose
                             drop(l);
 
-                            // Use only relative pose API (rotation + optional translation + quality)
+                            // Compute optical flow and relative pose between frames
                             if let Some(rp) = pose.estimate_relative_pose(&curr_of.optical_flow_to(&next_of), curr_of.size(), params, *ts, *next_ts) {
+                                // Store rotation, translation direction, and quality metrics in self.sync_results
                                 let mut l = results.write();
                                 if let Some(x) = l.get_mut(ts) {
                                     x.rotation = Some(rp.rotation);
                                     x.quat = Some(Quat64::from(rp.rotation));
                                     let rotvec = rp.rotation.scaled_axis() * (scaled_fps / every_nth_frame);
                                     x.euler = Some((rotvec[0], rotvec[1], rotvec[2]));
-                                    if let Some(tdir) = rp.translation_dir_cam.as_ref() {
-                                        x.translation_dir_cam = Some([tdir.x, tdir.y, tdir.z]);
+                                    if let Some(tdir) = rp.transl_dir.as_ref() {
+                                        x.transl_dir = Some([tdir.x, tdir.y, tdir.z]);
                                     }
                                     x.pose_quality = Some(PoseQuality::new(
                                         rp.inlier_ratio.unwrap_or(0.0), 
@@ -221,7 +224,7 @@ impl PoseEstimator {
                 }
             }
 
-            // Free unneeded img memory
+            // Free unneeded image memory (optical flow)
             let mut l = results.write();
             if let Some(curr) = l.get_mut(ts) {
                 if curr.of_method.can_cleanup() { curr.of_method.cleanup(); }
@@ -429,7 +432,7 @@ impl PoseEstimator {
         *self.estimated_quats.write() = quats;
     }
 
-    pub fn get_translation_dir_cam_near(&self, timestamp_us: i64, window_us: i64, use_average: bool) -> Option<([f64; 3], PoseQuality)> {
+    pub fn get_transl_dir_near(&self, timestamp_us: i64, window_us: i64, use_average: bool) -> Option<([f64; 3], PoseQuality)> {
         // Use try_read to avoid blocking the UI thread during motion direction stabilization
         let l = match self.sync_results.try_read() {
             Some(lock) => {
@@ -437,7 +440,7 @@ impl PoseEstimator {
             },
             None => {
                 // If we can't get the lock immediately, return None to avoid blocking
-                println!("get_translation_dir_cam_near() could not acquire sync_results read lock, skipping motion direction lookup");
+                println!("get_transl_dir_near() could not acquire sync_results read lock, skipping motion direction lookup");
                 return None;
             }
         };
@@ -451,7 +454,7 @@ impl PoseEstimator {
             let mut pose_qualities = Vec::new();
             
             for (ts, fr) in l.range(start..=end) {
-                if let Some(t) = fr.translation_dir_cam {
+                if let Some(t) = fr.transl_dir {
                     translations.push(t);
                     pose_qualities.push(fr.pose_quality.clone().unwrap_or_default());
                 }
@@ -491,7 +494,7 @@ impl PoseEstimator {
             let mut best: Option<(i64, [f64; 3], PoseQuality)> = None;
             
             for (ts, fr) in l.range(start..=end) {
-                if let Some(t) = fr.translation_dir_cam {
+                if let Some(t) = fr.transl_dir {
                     let qual = fr.pose_quality.clone().unwrap_or_default();
                     let dist = (timestamp_us - *ts).abs();
                     match best {

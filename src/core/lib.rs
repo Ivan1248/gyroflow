@@ -749,7 +749,7 @@ impl StabilizationManager {
                 let cy_i = size.1 as i32 / 2;
                 
                 // Get motion direction data or use default
-                let (tdir_cam, qual, color) = if let Some((tdir_cam, qual)) = self.pose_estimator.get_translation_dir_cam_near(timestamp_us, window_us*1, false) {
+                let (tdir_cam, qual, color) = if let Some((tdir_cam, qual)) = self.pose_estimator.get_transl_dir_near(timestamp_us, window_us*1, false) {
                     let color = if qual.inlier_ratio >= 0.5 { Color::Green } else if qual.inlier_ratio >= 0.2 { Color::Yellow } else { Color::Red };
                     (tdir_cam, qual, color)
                 } else {

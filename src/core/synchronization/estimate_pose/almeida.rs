@@ -32,7 +32,7 @@ impl EstimateRelativePoseTrait for PoseAlmeida {
 
         let rot = AlmeidaEstimator::default().estimate(&vectors, &self.cam, timestamp_ms);
         let rotation = na::convert(na::Rotation3::from(rot.inverse()));
-        Some(RelativePose { rotation, translation_dir_cam: None, inlier_ratio: None, median_epi_err: None })
+        Some(RelativePose { rotation, transl_dir: None, inlier_ratio: None, median_epi_err: None })
     }
 }
 

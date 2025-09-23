@@ -91,7 +91,7 @@ impl EstimateRelativePoseTrait for PoseFindEssentialMat {
 
             Ok(RelativePose {
                 rotation: cv_to_na(r1)?,
-                translation_dir_cam: tdir,
+                transl_dir: tdir,
                 inlier_ratio: Some(inlier_ratio),
                 median_epi_err: None,
             })

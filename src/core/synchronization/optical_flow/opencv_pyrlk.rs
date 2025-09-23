@@ -116,6 +116,8 @@ impl OpticalFlowTrait for OFOpenCVPyrLK {
         }
         None
     }
+
+    // Can cleanup if the frame has been used twice: as the next and as the current frame
     fn can_cleanup(&self) -> bool {
         self.used.load(std::sync::atomic::Ordering::SeqCst) == 2
     }

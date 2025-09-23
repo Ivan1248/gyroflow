@@ -97,7 +97,7 @@ impl EstimateRelativePoseTrait for PoseFindHomography {
                 let ty = *t.at_2d::<f64>(1, 0)?;
                 let tz = *t.at_2d::<f64>(2, 0)?;
                 let norm = (tx * tx + ty * ty + tz * tz).sqrt();
-                let translation_dir_cam = if norm > 0.0 { 
+                let transl_dir = if norm > 0.0 { 
                     Some(nalgebra::Unit::new_normalize(nalgebra::Vector3::new(tx, ty, tz))) 
                 } else { 
                     None  // No meaningful translation if norm is zero
@@ -111,7 +111,7 @@ impl EstimateRelativePoseTrait for PoseFindHomography {
 
                 Ok(RelativePose {
                     rotation,
-                    translation_dir_cam,
+                    transl_dir,
                     inlier_ratio,
                     median_epi_err: None,  // Not calculated for homography method
                 })
