@@ -694,28 +694,6 @@ impl StabilizationManager {
         }
         ret
     }
-    pub fn get_opticalflow_pixels(&self, timestamp_us: i64, num_frames: usize, size: (usize, usize)) -> Option<Vec<(i32, i32, usize)>> { // (x, y, alpha)
-        let mut ret = None;
-        for i in 0..num_frames {
-            match self.pose_estimator.get_of_lines_for_timestamp(&timestamp_us, i, 1.0, 1, false) {
-                (Some(lines), Some(frame_size)) => {
-                    let ratio = size.1 as f32 / frame_size.1.max(1) as f32;
-                    lines.0.1.into_iter().zip(lines.1.1.into_iter()).for_each(|(p1, p2)| {
-                        if ret.is_none() {
-                            // Only allocate if we actually have any points
-                            ret = Some(Vec::with_capacity(2048));
-                        }
-                        let line = line_drawing::Bresenham::new(((p1.0 * ratio) as isize, (p1.1 * ratio) as isize), ((p2.0 * ratio) as isize, (p2.1 * ratio) as isize));
-                        for point in line {
-                            ret.as_mut().unwrap().push((point.0 as i32, point.1 as i32, i));
-                        }
-                    });
-                }
-                _ => { }
-            }
-        }
-        ret
-    }
 
     pub fn draw_overlays(&self, drawing: &mut DrawCanvas, timestamp_us: i64) {
         drawing.clear();
@@ -727,20 +705,36 @@ impl StabilizationManager {
 
             if p.show_optical_flow {
                 let num_frames = if p.of_method == 2 { 1 } else { 3 };
-                if let Some(pxs) = self.get_opticalflow_pixels(timestamp_us, num_frames, size) {
-                    for (x, y, a) in pxs {
-                        let a = Alpha::from(a as u8);
-                        drawing.put_pixel(x, y, Color::Yellow, a, Stage::OnInput, y_inverted, 1);
+                // Inlined get_opticalflow_pixels with start point coloring
+                for i in 0..num_frames {
+                    match self.pose_estimator.get_of_lines_for_timestamp(&timestamp_us, i, 1.0, 1, false) {
+                        (Some(lines), Some(frame_size)) => {
+                            let ratio = size.1 as f32 / frame_size.1.max(1) as f32;
+                            lines.0.1.into_iter().zip(lines.1.1.into_iter()).for_each(|(p1, p2)| {
+                                // Draw the start point in a consistent color to distinguish from the line
+                                drawing.put_pixel((p1.0 * ratio) as i32, (p1.1 * ratio) as i32, Color::Red, Alpha::Alpha100, Stage::OnInput, y_inverted, 5);
+                                // Draw the line
+                                let line = line_drawing::Bresenham::new(((p1.0 * ratio) as isize, (p1.1 * ratio) as isize), ((p2.0 * ratio) as isize, (p2.1 * ratio) as isize));
+                                for point in line {
+                                    drawing.put_pixel(point.0 as i32, point.1 as i32, Color::Yellow, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
+                                }
+                            });
+                        }
+                        _ => { }
                     }
                 }
             }
+
+            // Points at detected features if a sparse method is used
             if p.show_detected_features {
                 if let Some(pxs) = self.get_features_pixels(timestamp_us, size) {
                     for (x, y) in pxs {
-                        drawing.put_pixel(x, y, Color::Green, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
+                        drawing.put_pixel(x, y, Color::Green, Alpha::Alpha100, Stage::OnInput, y_inverted, 5);
                     }
                 }
             }
+
+            // A line from the optical axis to the motion direction and a circle around the motion direction
             if p.show_motion_direction {
                 // Visualize motion direction as an arrow from image center
                 let window_us: i64 = 50000; // 50ms window for visualization
@@ -786,7 +780,7 @@ impl StabilizationManager {
                 // Draw a circle around the point
                 let circle = line_drawing::BresenhamCircle::new(u as isize, v as isize, 15);
                 for point in circle {
-                    drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 2);
+                    drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
                 }
             }
 

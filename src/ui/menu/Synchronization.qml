@@ -347,7 +347,7 @@ MenuItem {
 
             ComboBox {
                 id: syncMethod;
-                model: ["AKAZE", "OpenCV (PyrLK)", "OpenCV (DIS)"];
+                model: ["AKAZE", "PyrLK", "DIS"];
                 font.pixelSize: 12 * dpiScale;
                 width: parent.width;
                 currentIndex: 2;
@@ -361,7 +361,7 @@ MenuItem {
 
             ComboBox {
                 id: poseMethod;
-                // Expose both Essential variants (LMEDS and RANSAC)
+                // Expose both Essential matrix estimation variants (LMEDS and RANSAC)
                 model: ["Essential (LMEDS)", "Essential (RANSAC)", "Almeida", "EightPoint", "findHomography"];
                 font.pixelSize: 12 * dpiScale;
                 width: parent.width;

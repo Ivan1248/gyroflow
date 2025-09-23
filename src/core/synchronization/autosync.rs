@@ -211,12 +211,13 @@ impl AutosyncProcess {
         let mut scaled_ranges_us = Cow::Borrowed(&self.scaled_ranges_us);
         
         if self.mode == "synchronize" && !self.compute_params.read().gyro.read().has_motion() {
-            // Dummy sync point at the middle of the video with duration 500ms
+            // Dummy sync point at the middle of the video with duration 0
             let timestamps_fract = [0.5];
-            let time_per_syncpoint = 500.0;
+            let time_per_syncpoint = 0.0;
+            let fps_scale = self.fps_scale.unwrap_or(1.0);
             scaled_ranges_us = Cow::Owned(timestamps_fract.into_iter().map(|x| (
-                (((x * duration_ms) - (time_per_syncpoint / 2.0)).max(0.0)              * 1000.0 / self.fps_scale.unwrap_or(1.0)).round() as i64,
-                (((x * duration_ms) + (time_per_syncpoint / 2.0)).min(duration_ms) * 1000.0 / self.fps_scale.unwrap_or(1.0)).round() as i64
+                (((x * duration_ms) - (time_per_syncpoint / 2.0)).max(0.0)         * 1000.0 / fps_scale).round() as i64,
+                (((x * duration_ms) + (time_per_syncpoint / 2.0)).min(duration_ms) * 1000.0 / fps_scale).round() as i64
             )).collect());
         }
 
