@@ -581,7 +581,7 @@ impl Controller {
                self.stabilizer.pose_estimator.estimated_quats.is_locked() ||
                self.stabilizer.gyro.is_locked() ||
                self.stabilizer.params.is_locked() {
-                ::log::debug!("Chart mutex locked, retrying");
+                ::log::debug!("Chart mutex locked, retrying");  // retrying in chartUpdateTimer
                 return false;
             }
 

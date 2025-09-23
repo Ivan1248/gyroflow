@@ -103,12 +103,12 @@ impl GyroSource {
         }
     }
 
-    pub fn has_imu_from_metadata(&self) -> bool {
-        !self.file_metadata.read().has_motion() 
+    pub fn has_motion_from_metadata(&self) -> bool {
+        self.file_metadata.read().has_motion() 
     }
 
     pub fn has_motion(&self) -> bool {
-        self.file_metadata.read().has_motion() || !self.estimated_gyro.is_empty()
+        self.has_motion_from_metadata() || !self.estimated_gyro.is_empty()
     }
 
     pub fn set_use_gravity_vectors(&mut self, v: bool) {
@@ -623,7 +623,8 @@ impl GyroSource {
 
     pub fn set_estimated_gyro(&mut self, estimated_gyro: BTreeMap<i64, TimeIMU>) {
         self.estimated_gyro = estimated_gyro;
-        if !self.has_imu_from_metadata() {
+        // no need to compute quaternions if there is motion data from metadata, which has priority
+        if !self.has_motion_from_metadata() {
             self.integrate();
         }
     }
