@@ -695,6 +695,131 @@ impl StabilizationManager {
         ret
     }
 
+    fn get_projection_params(&self, timestamp_us: i64, size: (usize, usize)) -> (stabilization::ComputeParams, nalgebra::Matrix3<f64>, [f64; 12]) {
+        let ts_ms = timestamp_us as f64 / 1000.0;
+        let params = stabilization::ComputeParams::from_manager(self);
+        let (camera_matrix, distortion_coeffs, _radial_limit, _sx, _sy, _fl) = stabilization::FrameTransform::get_lens_data_at_timestamp(&params, ts_ms, false);
+        (params, camera_matrix, distortion_coeffs)
+    }
+
+    fn project_to_2d(&self, dir: nalgebra::Vector3<f64>, size: (usize, usize), camera_matrix: &nalgebra::Matrix3<f64>, distortion_coeffs: &[f64; 12], params: &stabilization::ComputeParams) -> (f64, f64) {
+        // Normalize and ensure forward z
+        let mut d = dir;
+        let n = d.norm();
+        if n > 0.0 { d /= n; }
+        if d.z <= 1e-6 { d.z = 1e-6; }
+
+        let fx = camera_matrix[(0, 0)];
+        let fy = camera_matrix[(1, 1)];
+        let cx = camera_matrix[(0, 2)];
+        let cy = camera_matrix[(1, 2)];
+
+        // Convert to normalized camera coords, then distort
+        let kp = stabilization::KernelParams {
+            width: size.0 as i32,
+            height: size.1 as i32,
+            f: [fx as f32, fy as f32],
+            c: [cx as f32, cy as f32],
+            k: distortion_coeffs.iter().map(|v| *v as f32).collect::<Vec<_>>().try_into().unwrap(),
+            ..Default::default()
+        };
+        let dm = params.distortion_model.clone();
+        let uv = dm.distort_point((d.x / d.z) as f32, (d.y / d.z) as f32, 1.0, &kp);
+        let u = (uv.0 as f64) * fx + cx;
+        let v = (uv.1 as f64) * fy + cy;
+        (u, v)
+    }
+
+    fn draw_motion_direction(&self, drawing: &mut DrawCanvas, timestamp_us: i64, size: (usize, usize), y_inverted: bool) {
+        // Get motion direction data or use default
+        let window_us: i64 = 50_000; // 50ms, no smoothing for visualization
+        let (tdir, qual, color) = if let Some((tdir, qual)) = self.pose_estimator.get_transl_dir_near(timestamp_us, window_us, false) {
+            (tdir, qual, if tdir[2] >= 0.0 { Color::Red } else { Color::Green })
+        } else {
+            // No motion data available, use default direction (forward)
+            ([0.0, 0.0, 1.0], crate::synchronization::PoseQuality::default(), Color::None)
+        };
+        
+        // Project direction to 2D using intrinsics and distortion at this timestamp
+        let (params, camera_matrix, distortion_coeffs) = self.get_projection_params(timestamp_us, size);
+        
+        // Flip sign to get motion direction and project to 2D
+        let dir_cam = -nalgebra::Vector3::new(tdir[0], tdir[1], tdir[2]);
+        let (u, v) = self.project_to_2d(dir_cam, size, &camera_matrix, &distortion_coeffs, &params);
+        
+        // Draw a line from the optical axis (principal point) to the projected point
+        let start = (camera_matrix[(0, 2)].round() as isize, camera_matrix[(1, 2)].round() as isize);
+        // Clamp to stay inside of view bounds
+        let end = (u.clamp(0f64, size.0 as f64) as isize, v.clamp(0f64, size.1 as f64) as isize);
+        let line = line_drawing::Bresenham::new(start, end);
+        for point in line {
+            drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 1);
+        }
+        // Draw a circle around the point
+        let circle = line_drawing::BresenhamCircle::new(u as isize, v as isize, 15);
+        for point in circle {
+            drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
+        }
+    }
+
+    fn draw_spherical_grid(&self, drawing: &mut DrawCanvas, timestamp_us: i64, size: (usize, usize), y_inverted: bool) {
+        let (params, camera_matrix, distortion_coeffs) = self.get_projection_params(timestamp_us, size);
+
+        // Draw function using existing undistortion/projection to ensure correctness
+        let mut draw_polyline = |pts: &[(f64, f64)]| {
+            let mut prev: Option<(i32, i32)> = None;
+            for &(u, v) in pts {
+                let x = u.round() as i32;
+                let y = v.round() as i32;
+                if let Some((px, py)) = prev {
+                    // Limit line length to prevent extremely long Bresenham lines that could cause performance issues
+                    let dx = (x - px).abs();
+                    let dy = (y - py).abs();
+                    if dx < 2000 && dy < 2000 { // Reasonable limit for 4K+ displays
+                        let line = line_drawing::Bresenham::new((px as isize, py as isize), (x as isize, y as isize));
+                        for pnt in line { drawing.put_pixel(pnt.0 as i32, pnt.1 as i32, Color::Blue3, Alpha::Alpha50, Stage::OnInput, y_inverted, 1); }
+                    }
+                }
+                prev = Some((x, y));
+            }
+        };
+
+        // Sampling resolution
+        let steps_lon = 360 / 3; // 3° steps for smoothness
+        let steps_lat = 180 / 3;
+
+        // Meridians (constant longitude), every 45° (8 meridians total)
+        // Rotated coordinate system: pole at center of original FOV
+        for lon_deg in (-180..=180).step_by(45) {
+            // Skip 180 duplicate of -180 to avoid overdraw
+            if lon_deg == 180 { continue; }
+            let lon = (lon_deg as f64).to_radians();
+            let mut poly: Vec<(f64, f64)> = Vec::new();
+            for i in 0..=steps_lat {
+                let lat = (-90.0 + i as f64 * (180.0 / steps_lat as f64)).to_radians();
+                let clat = lat.cos();
+                // Rotate coordinate system: X-right, Y-up, Z-forward -> X-right, Y-forward, Z-up
+                // This places the north pole (Z=1) at the center of the original field of view
+                let dir = nalgebra::Vector3::new(clat * lon.cos(), clat * lon.sin(), lat.sin()); // X-right, Y-forward, Z-up
+                poly.push(self.project_to_2d(dir, size, &camera_matrix, &distortion_coeffs, &params));
+            }
+            if poly.len() > 1 { draw_polyline(&poly); }
+        }
+
+        // Parallels (constant latitude), every 15°
+        for lat_deg in (-75..=75).step_by(15) { // avoid +/-90 singularities
+            let lat = (lat_deg as f64).to_radians();
+            let mut poly: Vec<(f64, f64)> = Vec::new();
+            for i in 0..=steps_lon {
+                let lon = (-180.0 + i as f64 * (360.0 / steps_lon as f64)).to_radians();
+                let clat = lat.cos();
+                let dir = nalgebra::Vector3::new(clat * lon.cos(), clat * lon.sin(), lat.sin());
+                poly.push(self.project_to_2d(dir, size, &camera_matrix, &distortion_coeffs, &params));
+            }
+            if poly.len() > 1 { draw_polyline(&poly); }
+        }
+    }
+
     pub fn draw_overlays(&self, drawing: &mut DrawCanvas, timestamp_us: i64) {
         drawing.clear();
 
@@ -724,7 +849,6 @@ impl StabilizationManager {
                     }
                 }
             }
-
             // Points at detected features if a sparse method is used
             if p.show_detected_features {
                 if let Some(pxs) = self.get_features_pixels(timestamp_us, size) {
@@ -733,172 +857,14 @@ impl StabilizationManager {
                     }
                 }
             }
-
             // A line from the optical axis to the motion direction and a circle around the motion direction
             if p.show_motion_direction {
-                // Get motion direction data or use default
-                let window_us: i64 = 50_000; // 50ms, no smoothing for visualization
-                let (tdir_cam, qual, color) = if let Some((tdir_cam, qual)) = self.pose_estimator.get_transl_dir_near(timestamp_us, window_us, false) {
-                    let color = if qual.inlier_ratio >= 0.5 { Color::Green } else if qual.inlier_ratio >= 0.2 { Color::Yellow } else { Color::Red };
-                    (tdir_cam, qual, color)
-                } else {
-                    // No motion data available, use default direction (forward)
-                    ([0.0, 0.0, 1.0], crate::synchronization::PoseQuality::default(), Color::None)
-                };
-                
-                // Project direction to 2D using intrinsics and distortion at this timestamp
-                let ts_ms = timestamp_us as f64 / 1000.0;
-                let params = stabilization::ComputeParams::from_manager(self);
-                let (camera_matrix, distortion_coeffs, _radial_limit, _sx, _sy, _fl) = stabilization::FrameTransform::get_lens_data_at_timestamp(&params, ts_ms, false);
-
-                // Distortion-aware projection (match spherical grid semantics)
-                let fx = camera_matrix[(0, 0)];
-                let fy = camera_matrix[(1, 1)];
-                let cx = camera_matrix[(0, 2)];
-                let cy = camera_matrix[(1, 2)];
-
-                let mut d = nalgebra::Vector3::new(tdir_cam[0], tdir_cam[1], tdir_cam[2]);
-                let n = d.norm();
-                if n > 0.0 { d /= n; }
-                // Hack that enforces forward facing (+Z) – assumes forward motion and z sign ambiguity even if there isn't any
-                // TODO: check why z needs to be flipped when moving forward
-                if d.z <= 0.0 { d = -d; }
-                if d.z.abs() <= 1e-6 { d.z = 1e-6 * d.z.signum(); }
-
-                let kp = stabilization::KernelParams {
-                    width: size.0 as i32,
-                    height: size.1 as i32,
-                    f: [fx as f32, fy as f32],
-                    c: [cx as f32, cy as f32],
-                    k: distortion_coeffs.iter().map(|v| *v as f32).collect::<Vec<_>>().try_into().unwrap(),
-                    ..Default::default()
-                };
-
-                let dm = params.distortion_model.clone();
-                let uv = dm.distort_point(d.x as f32, d.y as f32, d.z as f32, &kp);
-                let u = (uv.0 as f64) * fx + cx;
-                let v = (uv.1 as f64) * fy + cy;
-
-                // Draw a line from the optical axis (principal point) to the projected point
-                let start = (cx.round() as isize, cy.round() as isize);
-                // Clamp to stay inside of view bounds
-                let end = (u.clamp(0f64, size.0 as f64) as isize, v.clamp(0f64, size.1 as f64) as isize);
-                let line = line_drawing::Bresenham::new(start, end);
-                for point in line {
-                    drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 1);
-                }
-                // Draw a circle around the point
-                let circle = line_drawing::BresenhamCircle::new(u as isize, v as isize, 15);
-                for point in circle {
-                    drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
-                }
+                self.draw_motion_direction(drawing, timestamp_us, size, y_inverted);
             }
-
             // Spherical grid overlay (meridians/parallels every 15 degrees) with pole on the optical axis
             if p.show_spherical_grid {
-                let ts_ms = timestamp_us as f64 / 1000.0;
-                
-                // Use try_read to avoid blocking the UI thread during spherical grid rendering
-                let params = match self.params.try_read() {
-                    Some(_) => stabilization::ComputeParams::from_manager(self),
-                    None => {
-                        // Skip grid drawing if we can't get params lock immediately
-                        return;
-                    }
-                };
-                
-                let (camera_matrix, distortion_coeffs, _radial_limit, _sx, _sy, _fl) = stabilization::FrameTransform::get_lens_data_at_timestamp(&params, ts_ms, false);
-
-                // Draw function using existing undistortion/projection to ensure correctness
-                let mut draw_polyline = |pts: &[(f64, f64)]| {
-                    let mut prev: Option<(i32, i32)> = None;
-                    for &(u, v) in pts {
-                        let x = u.round() as i32;
-                        let y = v.round() as i32;
-                        if let Some((px, py)) = prev {
-                            // Limit line length to prevent extremely long Bresenham lines that could cause performance issues
-                            let dx = (x - px).abs();
-                            let dy = (y - py).abs();
-                            if dx < 2000 && dy < 2000 { // Reasonable limit for 4K+ displays
-                                let line = line_drawing::Bresenham::new((px as isize, py as isize), (x as isize, y as isize));
-                                for pnt in line { drawing.put_pixel(pnt.0 as i32, pnt.1 as i32, Color::Blue3, Alpha::Alpha50, Stage::OnInput, y_inverted, 1); }
-                            }
-                        }
-                        prev = Some((x, y));
-                    }
-                };
-
-                // Helper to project a 3D direction to pixel, through lens model
-                let project_dir = |dir: [f64; 3]| -> Option<(f64, f64)> {
-                    // Normalize and ensure forward z
-                    let mut d = nalgebra::Vector3::new(dir[0], dir[1], dir[2]);
-                    let n = d.norm();
-                    if n > 0.0 { d /= n; }
-                    if d.z <= 1e-6 { d.z = 1e-6; }
-
-                    let fx = camera_matrix[(0, 0)];
-                    let fy = camera_matrix[(1, 1)];
-                    let cx = camera_matrix[(0, 2)];
-                    let cy = camera_matrix[(1, 2)];
-
-                    // Convert to normalized camera coords, then distort
-                    let x = d.x / d.z;
-                    let y = d.y / d.z;
-
-                    // Build KernelParams minimally for distortion call
-                    let mut kp: stabilization::KernelParams = Default::default();
-                    kp.width = size.0 as i32;
-                    kp.height = size.1 as i32;
-                    kp.f = [fx as f32, fy as f32];
-                    kp.c = [cx as f32, cy as f32];
-                    kp.k = distortion_coeffs.iter().map(|v| *v as f32).collect::<Vec<_>>().try_into().unwrap();
-
-                    let dm = params.distortion_model.clone();
-                    let uv = dm.distort_point(x as f32, y as f32, 1.0, &kp);
-                    let u = (uv.0 as f64) * fx + cx;
-                    let v = (uv.1 as f64) * fy + cy;
-                    Some((u, v))
-                };
-
-                // Sampling resolution
-                let steps_lon = 360 / 3; // 3° steps for smoothness
-                let steps_lat = 180 / 3;
-
-                // Meridians (constant longitude), every 45° (8 meridians total)
-                // Rotated coordinate system: pole at center of original FOV
-                for lon_deg in (-180..=180).step_by(45) {
-                    // Skip 180 duplicate of -180 to avoid overdraw
-                    if lon_deg == 180 { continue; }
-                    let lon = (lon_deg as f64).to_radians();
-                    let mut poly: Vec<(f64, f64)> = Vec::new();
-                    for i in 0..=steps_lat {
-                        let lat = (-90.0 + i as f64 * (180.0 / steps_lat as f64)).to_radians();
-                        let clat = lat.cos();
-                        // Rotate coordinate system: X-right, Y-up, Z-forward -> X-right, Y-forward, Z-up
-                        // This places the north pole (Z=1) at the center of the original field of view
-                        let dir = [clat * lon.cos(), clat * lon.sin(), lat.sin()]; // X-right, Y-forward, Z-up
-                        if let Some(pt) = project_dir(dir) { poly.push(pt); }
-                    }
-                    if poly.len() > 1 { draw_polyline(&poly); }
-                }
-
-                // Parallels (constant latitude), every 15°
-                // Rotated coordinate system: pole at center of original FOV
-                for lat_deg in (-75..=75).step_by(15) { // avoid +/-90 singularities
-                    let lat = (lat_deg as f64).to_radians();
-                    let mut poly: Vec<(f64, f64)> = Vec::new();
-                    for i in 0..=steps_lon {
-                        let lon = (-180.0 + i as f64 * (360.0 / steps_lon as f64)).to_radians();
-                        let clat = lat.cos();
-                        // Rotate coordinate system: X-right, Y-up, Z-forward -> X-right, Y-forward, Z-up
-                        // This places the north pole (Z=1) at the center of the original field of view
-                        let dir = [clat * lon.cos(), clat * lon.sin(), lat.sin()];
-                        if let Some(pt) = project_dir(dir) { poly.push(pt); }
-                    }
-                    if poly.len() > 1 { draw_polyline(&poly); }
-                }
+                self.draw_spherical_grid(drawing, timestamp_us, size, y_inverted);
             }
-
             // Draw chessboard corners if calibrator is enabled
             #[cfg(feature = "opencv")]
             if p.is_calibrator {
@@ -910,7 +876,6 @@ impl StabilizationManager {
                     }
                 }
             }
-
             // Draw zooming debug points
             if !p.zooming_debug_points.is_empty() {
                 if let Some((_, points)) = p.zooming_debug_points.range(timestamp_us - 1000..).next() {

@@ -82,10 +82,9 @@ impl EstimateRelativePoseTrait for PoseFindEssentialMat {
             let total = if rows <= 0 { 1.0 } else { rows as f64 };
             let inlier_ratio = (inliers as f64 / total).min(1.0);
 
-            // translation direction
             let tx = *t.at_2d::<f64>(0, 0)?;
             let ty = *t.at_2d::<f64>(1, 0)?;
-            let tz = *t.at_2d::<f64>(2, 0)?;
+            let tz = *t.at_2d::<f64>(2, 0)?;  // -1 if the camera is moving forward
             let norm = (tx * tx + ty * ty + tz * tz).sqrt();
             let tdir = if norm > 0.0 { Some(nalgebra::Unit::new_normalize(nalgebra::Vector3::new(tx, ty, tz))) } else { None };
 

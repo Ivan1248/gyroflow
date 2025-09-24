@@ -14,7 +14,7 @@ mod find_homography;    pub use self::find_homography::*;
 #[derive(Clone, Debug)]
 pub struct RelativePose {
     pub rotation: Rotation3<f64>,
-    pub transl_dir: Option<UnitVector3<f64>>, // unit vector in camera frame (+Z forward convention)
+    pub transl_dir: Option<UnitVector3<f64>>, // unit vector in camera frame, (0, 0, -1) if the camera is moving forward
     pub inlier_ratio: Option<f64>,
     pub median_epi_err: Option<f64>,
 }
