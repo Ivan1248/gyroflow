@@ -712,11 +712,11 @@ impl StabilizationManager {
                             let ratio = size.1 as f32 / frame_size.1.max(1) as f32;
                             lines.0.1.into_iter().zip(lines.1.1.into_iter()).for_each(|(p1, p2)| {
                                 // Draw the start point in a consistent color to distinguish from the line
-                                drawing.put_pixel((p1.0 * ratio) as i32, (p1.1 * ratio) as i32, Color::Red, Alpha::Alpha100, Stage::OnInput, y_inverted, 5);
+                                drawing.put_pixel((p1.0 * ratio) as i32, (p1.1 * ratio) as i32, Color::Green, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
                                 // Draw the line
                                 let line = line_drawing::Bresenham::new(((p1.0 * ratio) as isize, (p1.1 * ratio) as isize), ((p2.0 * ratio) as isize, (p2.1 * ratio) as isize));
                                 for point in line {
-                                    drawing.put_pixel(point.0 as i32, point.1 as i32, Color::Yellow, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
+                                    drawing.put_pixel(point.0 as i32, point.1 as i32, Color::Yellow, Alpha::Alpha100, Stage::OnInput, y_inverted, 1);
                                 }
                             });
                         }
@@ -736,47 +736,57 @@ impl StabilizationManager {
 
             // A line from the optical axis to the motion direction and a circle around the motion direction
             if p.show_motion_direction {
-                // Visualize motion direction as an arrow from image center
-                let window_us: i64 = 50000; // 50ms window for visualization
-                
-                let cx_i = size.0 as i32 / 2;
-                let cy_i = size.1 as i32 / 2;
-                
                 // Get motion direction data or use default
-                let (tdir_cam, qual, color) = if let Some((tdir_cam, qual)) = self.pose_estimator.get_transl_dir_near(timestamp_us, window_us*1, false) {
+                let window_us: i64 = 50_000; // 50ms, no smoothing for visualization
+                let (tdir_cam, qual, color) = if let Some((tdir_cam, qual)) = self.pose_estimator.get_transl_dir_near(timestamp_us, window_us, false) {
                     let color = if qual.inlier_ratio >= 0.5 { Color::Green } else if qual.inlier_ratio >= 0.2 { Color::Yellow } else { Color::Red };
                     (tdir_cam, qual, color)
                 } else {
                     // No motion data available, use default direction (forward)
-                    let default_dir = [0.0, 0.0, 1.0];
-                    let default_qual = crate::synchronization::PoseQuality::default();
-                    (default_dir, default_qual, Color::None)
+                    ([0.0, 0.0, 1.0], crate::synchronization::PoseQuality::default(), Color::None)
                 };
                 
-                // Project direction to 2D using intrinsics at this timestamp
+                // Project direction to 2D using intrinsics and distortion at this timestamp
                 let ts_ms = timestamp_us as f64 / 1000.0;
                 let params = stabilization::ComputeParams::from_manager(self);
-                let (camera_matrix, _dist, _fx, _fy, _fov, _fl) = stabilization::FrameTransform::get_lens_data_at_timestamp(&params, ts_ms, false);
-                
-                // Use the new projection function
-                let depth = 1.0_f64;
-                let (u_raw, v_raw) = self.project_camera_direction_to_2d(tdir_cam, &camera_matrix, depth);
-                
-                // Clamp the projected coordinates to stay within view bounds
-                let margin = -50.0; // Keep some margin from edges
-                let u = u_raw.clamp(margin, size.0 as f64 - margin);
-                let v = v_raw.clamp(margin, size.1 as f64 - margin);
-                
-                // Print coordinate information for debugging
-                //println!("Drawing motion direction: center=({}, {}), target=({}, {}), clamped=({}, {}), size=({}, {})", 
-                //         cx_i, cy_i, u_raw, v_raw, u, v, size.0, size.1);
+                let (camera_matrix, distortion_coeffs, _radial_limit, _sx, _sy, _fl) = stabilization::FrameTransform::get_lens_data_at_timestamp(&params, ts_ms, false);
 
-                // Draw a line connecting the center to the projected point
-                let line = line_drawing::Bresenham::new((cx_i as isize, cy_i as isize), (u as isize, v as isize));
+                // Distortion-aware projection (match spherical grid semantics)
+                let fx = camera_matrix[(0, 0)];
+                let fy = camera_matrix[(1, 1)];
+                let cx = camera_matrix[(0, 2)];
+                let cy = camera_matrix[(1, 2)];
+
+                let mut d = nalgebra::Vector3::new(tdir_cam[0], tdir_cam[1], tdir_cam[2]);
+                let n = d.norm();
+                if n > 0.0 { d /= n; }
+                // Hack that enforces forward facing (+Z) – assumes forward motion and z sign ambiguity even if there isn't any
+                // TODO: check why z needs to be flipped when moving forward
+                if d.z <= 0.0 { d = -d; }
+                if d.z.abs() <= 1e-6 { d.z = 1e-6 * d.z.signum(); }
+
+                let kp = stabilization::KernelParams {
+                    width: size.0 as i32,
+                    height: size.1 as i32,
+                    f: [fx as f32, fy as f32],
+                    c: [cx as f32, cy as f32],
+                    k: distortion_coeffs.iter().map(|v| *v as f32).collect::<Vec<_>>().try_into().unwrap(),
+                    ..Default::default()
+                };
+
+                let dm = params.distortion_model.clone();
+                let uv = dm.distort_point(d.x as f32, d.y as f32, d.z as f32, &kp);
+                let u = (uv.0 as f64) * fx + cx;
+                let v = (uv.1 as f64) * fy + cy;
+
+                // Draw a line from the optical axis (principal point) to the projected point
+                let start = (cx.round() as isize, cy.round() as isize);
+                // Clamp to stay inside of view bounds
+                let end = (u.clamp(0f64, size.0 as f64) as isize, v.clamp(0f64, size.1 as f64) as isize);
+                let line = line_drawing::Bresenham::new(start, end);
                 for point in line {
                     drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 1);
                 }
-                
                 // Draw a circle around the point
                 let circle = line_drawing::BresenhamCircle::new(u as isize, v as isize, 15);
                 for point in circle {
@@ -784,7 +794,7 @@ impl StabilizationManager {
                 }
             }
 
-            // Spherical grid overlay (meridians/parallels every 15 degrees) with pole at center of original field of view
+            // Spherical grid overlay (meridians/parallels every 15 degrees) with pole on the optical axis
             if p.show_spherical_grid {
                 let ts_ms = timestamp_us as f64 / 1000.0;
                 
@@ -888,6 +898,8 @@ impl StabilizationManager {
                     if poly.len() > 1 { draw_polyline(&poly); }
                 }
             }
+
+            // Draw chessboard corners if calibrator is enabled
             #[cfg(feature = "opencv")]
             if p.is_calibrator {
                 let lock = self.lens_calibrator.read();
@@ -898,6 +910,8 @@ impl StabilizationManager {
                     }
                 }
             }
+
+            // Draw zooming debug points
             if !p.zooming_debug_points.is_empty() {
                 if let Some((_, points)) = p.zooming_debug_points.range(timestamp_us - 1000..).next() {
                     for i in 0..points.len() {
@@ -1019,26 +1033,6 @@ impl StabilizationManager {
     pub fn set_background_mode       (&self, v: i32)  { self.params.write().background_mode = stabilization_params::BackgroundMode::from(v); }
     pub fn set_background_margin     (&self, v: f64)  { self.params.write().background_margin = v; }
     pub fn set_background_margin_feather(&self, v: f64) { self.params.write().background_margin_feather = v; }
-
-    /// Project a camera direction vector to 2D pixel coordinates using camera intrinsics
-    pub fn project_camera_direction_to_2d(&self, direction: [f64; 3], camera_matrix: &nalgebra::Matrix3<f64>, depth: f64) -> (f64, f64) {
-        let fx = camera_matrix[(0, 0)];
-        let fy = camera_matrix[(1, 1)];
-        let cx = camera_matrix[(0, 2)];
-        let cy = camera_matrix[(1, 2)];
-
-        // Build a ray in camera frame and project
-        let x = direction[0] * depth;
-        let y = direction[1] * depth;
-        let z = direction[2] * depth;
-        let z_reg = if z.abs() < 1e-5 { z.signum() * 1e-5 } else { z };
-        
-        //println!("DEBUG project_camera_direction_to_2d: direction={:?}, z={}, z_reg={}", direction, z, z_reg);  // TODO: leave for debugging
-
-        let u = fx * (x / z_reg) + cx;
-        let v = fy * (y / z_reg) + cy;
-        (u, v)
-    }
     pub fn set_input_horizontal_stretch (&self, v: f64) { self.lens.write().input_horizontal_stretch = v; self.invalidate_zooming(); }
     pub fn set_input_vertical_stretch   (&self, v: f64) { self.lens.write().input_vertical_stretch   = v; self.invalidate_zooming(); }
     pub fn set_max_zoom(&self, v: f64, iters: usize)  {
