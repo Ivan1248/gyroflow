@@ -56,14 +56,21 @@ impl OpticalFlowTrait for OFOpenCVDis {
                 let a2_img = unsafe { Mat::new_size_with_data_unsafe(Size::new(next.img.width() as i32, next.img.height() as i32), CV_8UC1, next.img.as_raw().as_ptr() as *mut std::ffi::c_void, 0) }?;
 
                 let mut of = Mat::default();
-                let mut optflow = opencv::video::DISOpticalFlow::create(opencv::video::DISOpticalFlow_PRESET_FAST)?;
+                let mut optflow = opencv::video::DISOpticalFlow::create(opencv::video::DISOpticalFlow_PRESET_FAST)?;  // stride 4, patsh size 8
+                //use opencv::prelude::DISOpticalFlowTraitConst;
+                //log::debug!("DIS patch stride: {}, patch size: {}", optflow.get_patch_stride()?, optflow.get_patch_size()?);
                 optflow.calc(&a1_img, &a2_img, &mut of)?;
 
                 let mut points_a = Vec::new();
                 let mut points_b = Vec::new();
-                let step = w as usize / 15; // 15 points
-                for i in (0..a1_img.cols()).step_by(step) {
-                    for j in (0..a1_img.rows()).step_by(step) {
+                // hard-coded grid step size
+                let num_points_over_width = 15_i32;  // TODO: make this a parameter
+                let step = w / num_points_over_width;
+                // offsets for centering the grid
+                let w_offset = step / 2 + ((w - step) % step) / 2;
+                let h_offset = step / 2 + ((h - step) % step) / 2;
+                for i in (h_offset..a1_img.cols()).step_by(step as usize) {
+                    for j in (w_offset..a1_img.rows()).step_by(step as usize) {
                         let pt = of.at_2d::<Vec2f>(j, i)?;
                         points_a.push((i as f32, j as f32));
                         points_b.push((i as f32 + pt[0] as f32, j as f32 + pt[1] as f32));
