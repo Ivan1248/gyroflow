@@ -185,5 +185,3 @@ impl MotionDirection {
         out
     }
 }
-
-
