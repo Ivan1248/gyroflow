@@ -78,6 +78,7 @@ pub struct GyroSource {
     pub max_angles: (f64, f64, f64), // (pitch, yaw, roll) in deg
 
     pub smoothing_status: serde_json::Value,
+    pub motion_direction_status: serde_json::Value,
 
     pub prevent_recompute: bool,
 
@@ -587,7 +588,7 @@ impl GyroSource {
         }
     }
 
-    pub fn recompute_smoothness(&self, alg: &dyn SmoothingAlgorithm, horizon_lock: super::smoothing::horizon::HorizonLock, compute_params: &crate::ComputeParams) -> (TimeQuat, (f64, f64, f64)) {
+    pub fn recompute_smoothness(&self, alg: &dyn SmoothingAlgorithm, horizon_lock: super::smoothing::horizon::HorizonLock, motion_direction: Option<&super::smoothing::MotionDirection>, compute_params: &crate::ComputeParams) -> (TimeQuat, (f64, f64, f64)) {
         let file_metadata = self.file_metadata.read();
         let mut smoothed_quaternions = self.quaternions.clone();
 
@@ -602,15 +603,12 @@ impl GyroSource {
             *q *= additional_rotation;
         }
 
-        if true {
-            // Lock horizon, then smooth
-            horizon_lock.lock(&mut smoothed_quaternions, &self.quaternions, &file_metadata.gravity_vectors, self.use_gravity_vectors, self.integration_method, compute_params);
-            smoothed_quaternions = alg.smooth(&smoothed_quaternions, self.duration_ms, compute_params);
-        } else {
-            // Smooth, then lock horizon
-            smoothed_quaternions = alg.smooth(&smoothed_quaternions, self.duration_ms, compute_params);
-            horizon_lock.lock(&mut smoothed_quaternions, &self.quaternions, &file_metadata.gravity_vectors, self.use_gravity_vectors, self.integration_method, compute_params);
+        // Motion direction, then lock horizon, then smooth
+        if let Some(md) = motion_direction {
+            smoothed_quaternions = md.apply(&smoothed_quaternions, self.duration_ms, compute_params);
         }
+        horizon_lock.lock(&mut smoothed_quaternions, &self.quaternions, &file_metadata.gravity_vectors, self.use_gravity_vectors, self.integration_method, compute_params);
+        smoothed_quaternions = alg.smooth(&smoothed_quaternions, self.duration_ms, compute_params);
 
         let max_angles = crate::Smoothing::get_max_angles(&self.quaternions, &smoothed_quaternions, compute_params);
 

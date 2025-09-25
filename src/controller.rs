@@ -78,6 +78,10 @@ pub struct Controller {
     get_smoothing_max_angles: qt_method!(fn(&self) -> QJsonArray),
     get_smoothing_status: qt_method!(fn(&self) -> QJsonArray),
     set_smoothing_param: qt_method!(fn(&self, name: QString, val: f64)),
+    // Motion direction controls
+    set_motion_direction_alignment: qt_method!(fn(&self, enabled: bool)),
+    set_motion_direction_param: qt_method!(fn(&self, name: QString, val: f64)),
+    get_motion_direction_status: qt_method!(fn(&self) -> QJsonArray),
     set_horizon_lock: qt_method!(fn(&self, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64)),
     set_use_gravity_vectors: qt_method!(fn(&self, v: bool)),
     set_horizon_lock_integration_method: qt_method!(fn(&self, v: i32)),
@@ -451,6 +455,9 @@ impl Controller {
             ::log::info!("Setting orientation {}", &orientation);
             this.orientation_guessed(QString::from(orientation));
         });
+        let request_recompute = util::qt_queued_callback_mut(self, move |this, _: ()| {
+            this.request_recompute();
+        });
         let err = util::qt_queued_callback_mut(self, |this, (msg, mut arg): (String, String)| {
             arg.push_str("\n\n");
             arg.push_str(&rendering::get_log());
@@ -534,7 +541,11 @@ impl Controller {
                         if let Err(e) = proc.start_decoder_only(ranges, cancel_flag.clone()) {
                             err(("An error occured: %1".to_string(), e.to_string()));
                         }
+                        // Trigger an early recompute as soon as autosync has finished feeding frames,
+                        // for motion direction alignment if it is enabled
+                        request_recompute(());
                         sync.finished_feeding_frames();
+                        request_recompute(());
                     }
                     Err(error) => {
                         err(("An error occured: %1".to_string(), error.to_string()));
@@ -1188,6 +1199,19 @@ impl Controller {
         self.stabilizer.set_smoothing_param(&name.to_string(), val);
         self.chart_data_changed();
         self.request_recompute();
+    }
+    fn set_motion_direction_alignment(&mut self, enabled: bool) {
+        self.stabilizer.set_motion_direction_alignment(enabled);
+        self.chart_data_changed();
+        self.request_recompute();
+    }
+    fn set_motion_direction_param(&mut self, name: QString, val: f64) {
+        self.stabilizer.set_motion_direction_param(&name.to_string(), val);
+        self.chart_data_changed();
+        self.request_recompute();
+    }
+    fn get_motion_direction_status(&self) -> QJsonArray {
+        util::serde_json_to_qt_array(&self.stabilizer.get_motion_direction_status())
     }
     wrap_simple_method!(set_horizon_lock, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_use_gravity_vectors, v: bool; recompute; chart_data_changed);

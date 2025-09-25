@@ -5,23 +5,22 @@ use super::*;
 use std::sync::Mutex;
 
 pub struct MotionDirection {
-    pub time_constant: f64,
     pub min_inlier_ratio: f64,
     pub max_epi_err: f64,
-    pub motion_window_ms: f64,
-    pub smoothing_enabled: bool,
+    pub flip_backward_dir: bool,
     status: Mutex<Vec<serde_json::Value>>,
 }
 
 impl Default for MotionDirection {
     fn default() -> Self {
         Self {
-            time_constant: 0.25,
             min_inlier_ratio: 0.2,
             max_epi_err: 2.0,
-            motion_window_ms: 50.0,
-            smoothing_enabled: true,
-            status: Mutex::new(Vec::new()),
+            flip_backward_dir: false,
+            status: Mutex::new(vec![serde_json::json!({
+                "type": "Label",
+                "text": "Cannot apply motion direction alignment: vision-based motion direction data has not been computed."
+            })]),
         }
     }
 }
@@ -30,62 +29,33 @@ impl Clone for MotionDirection {
     fn clone(&self) -> Self {
         let status = self.status.lock().unwrap().clone();
         Self {
-            time_constant: self.time_constant,
             min_inlier_ratio: self.min_inlier_ratio,
             max_epi_err: self.max_epi_err,
-            motion_window_ms: self.motion_window_ms,
-            smoothing_enabled: self.smoothing_enabled,
+            flip_backward_dir: self.flip_backward_dir,
             status: Mutex::new(status)
         }
     }
 }
 
-impl SmoothingAlgorithm for MotionDirection {
-    fn get_name(&self) -> String { "Motion direction".to_owned() }
-
-    fn set_parameter(&mut self, name: &str, val: f64) {
+impl MotionDirection {
+    pub fn set_parameter(&mut self, name: &str, val: f64) {
         match name {
-            "time_constant" => self.time_constant = val,
             "min_inlier_ratio" => self.min_inlier_ratio = val,
             "max_epi_err" => self.max_epi_err = val,
-            "motion_window_ms" => self.motion_window_ms = val,
-            "smoothing_enabled" => self.smoothing_enabled = val >= 0.5,
             _ => log::error!("Invalid parameter name: {}", name)
         }
     }
-    fn get_parameter(&self, name: &str) -> f64 {
+    pub fn get_parameter(&self, name: &str) -> f64 {
         match name {
-            "time_constant" => self.time_constant,
             "min_inlier_ratio" => self.min_inlier_ratio,
             "max_epi_err" => self.max_epi_err,
-            "motion_window_ms" => self.motion_window_ms,
-            "smoothing_enabled" => if self.smoothing_enabled { 1.0 } else { 0.0 },
             _ => 0.0
         }
     }
 
-    fn get_parameters_json(&self) -> serde_json::Value {
+    pub fn get_parameters_json(&self) -> serde_json::Value {
         serde_json::json!([
         {
-            "name": "smoothing_enabled",
-            "description": "Enable smoothing (blend towards target)",
-            "type": "CheckBox",
-            "value": self.smoothing_enabled,
-            "default": true,
-            "custom_qml": "id: mdSmoothingEnabled"
-        },
-        {
-            "name": "time_constant",
-            "description": "Smoothness",
-            "type": "SliderWithField",
-            "from": 0.01,
-            "to": 10.0,
-            "value": self.time_constant,
-            "default": 0.25,
-            "unit": "s",
-            "keyframe": "SmoothingParamTimeConstant",
-            "custom_qml": "enabled: mdSmoothingEnabled.checked"
-        },{
             "name": "min_inlier_ratio",
             "description": "Min inlier ratio",
             "type": "SliderWithField",
@@ -105,54 +75,29 @@ impl SmoothingAlgorithm for MotionDirection {
             "default": 2.0,
             "precision": 3,
             "unit": ""
-        },{
-            "name": "motion_window_ms",
-            "description": "Motion sampling window",
-            "type": "SliderWithField",
-            "from": 5.0,
-            "to": 500.0,
-            "value": self.motion_window_ms,
-            "default": 50.0,
-            "precision": 0,
-            "unit": "ms"
         }])
     }
-    fn get_status_json(&self) -> serde_json::Value { serde_json::Value::Array(self.status.lock().unwrap().clone()) }
-    fn get_checksum(&self) -> u64 {
+    pub fn get_status_json(&self) -> serde_json::Value { serde_json::Value::Array(self.status.lock().unwrap().clone()) }
+    pub fn get_checksum(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        hasher.write_u64(self.time_constant.to_bits());
         hasher.write_u64(self.min_inlier_ratio.to_bits());
         hasher.write_u64(self.max_epi_err.to_bits());
-        hasher.write_u64(self.motion_window_ms.to_bits());
-        hasher.write_u64(if self.smoothing_enabled { 1u64 } else { 0u64 });
         hasher.finish()
     }
 
-    fn smooth(&self, quats: &TimeQuat, duration_ms: f64, compute_params: &ComputeParams) -> TimeQuat {
+    pub fn apply(&self, quats: &TimeQuat, duration_ms: f64, compute_params: &ComputeParams) -> TimeQuat {
         //if quats.is_empty() || duration_ms <= 0.0 { 
         //    return quats.clone(); 
         //}
         // Check if pose estimator has any motion data
-        let _ = {
-            if let Some(sync_results) = compute_params.pose_estimator.sync_results.try_read() {
-                sync_results.values().any(|fr| fr.transl_dir.is_some())
-            } else {
-                *self.status.lock().unwrap() = vec![serde_json::json!({
-                    "type": "Label",
-                    "text": "Motion direction: no motion samples available. Check pose estimation settings or re-run synchronization."
-                })];
-                return quats.clone();
-            }
-        };
+        if compute_params.pose_estimator.sync_results.try_read().map_or(true, |sr| !sr.values().any(|fr| fr.transl_dir.is_some())) {
+            *self.status.lock().unwrap() = MotionDirection::default().status.lock().unwrap().clone();
+            return quats.clone();
+        }
 
         let sample_rate: f64 = quats.len() as f64 / (duration_ms / 1000.0);
-        let get_alpha = |time_constant: f64| 1.0 - (-(1.0 / sample_rate) / time_constant).exp();
-        let alpha = if self.smoothing_enabled {
-            if self.time_constant > 0.0 { get_alpha(self.time_constant) } else { 1.0 }
-        } else { 1.0 };
 
         let mut out = TimeQuat::new();
-
 
         // Debug counters
         let mut frames_total: usize = 0;
@@ -166,11 +111,13 @@ impl SmoothingAlgorithm for MotionDirection {
             frames_total += 1;
             
             // Get motion direction within window
-            let window_us: i64 = (self.motion_window_ms * 1000.0) as i64;
+            let window_us = 50_000_i64;
             let motion_dir_opt: Option<nalgebra::Vector3<f64>> = if let Some((tdir, qual)) = compute_params.pose_estimator.get_transl_dir_near(*ts, window_us, false) {
                 if qual.meets_thresholds(self.min_inlier_ratio, self.max_epi_err) {
                     // Flip sign to get camera motion direction
-                    Some(-nalgebra::Vector3::new(tdir[0], tdir[1], tdir[2]))
+                    // TODO: remove the if and always multiply by -1 so that the camera points in the forward movement direction
+                    let sign_correction = if tdir[2] <= 0.0 { /*forward*/ -1.0} else if self.flip_backward_dir {1.0} else {-1.0};
+                    Some(sign_correction * nalgebra::Vector3::new(tdir[0], tdir[1], tdir[2]))
                 } else { None }
             } else { skipped_no_sample += 1; None };
 
@@ -195,7 +142,7 @@ impl SmoothingAlgorithm for MotionDirection {
 
             let new_q = if let Some(target_q) = target { 
                 targets_used += 1;
-                quat.slerp(&target_q, alpha) 
+                quat.slerp(&target_q, 1.0) 
             } else { *quat };
             out.insert(*ts, new_q);
         }

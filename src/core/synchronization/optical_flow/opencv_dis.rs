@@ -134,8 +134,6 @@ impl OpticalFlowTrait for OFOpenCVDis {
                     let frame1_debug_path = format!("{}/dis_frame_{:06}_debug.png", debug_dir, self.timestamp_us);
                     if let Err(e) = frame1_debug.save(&frame1_debug_path) {
                         log::error!("Failed to save DIS debug frame: {} - {}", frame1_debug_path, e);
-                    } else {
-                        log::debug!("Successfully saved DIS debug frame: {}", frame1_debug_path);
                     }
                 }
                 Ok((points_a, points_b))

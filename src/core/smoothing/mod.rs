@@ -41,7 +41,6 @@ impl Default for Algs {
             Box::new(self::default_algo::DefaultAlgo::default()),
             Box::new(self::plain::Plain::default()),
             Box::new(self::fixed::Fixed::default()),
-            Box::new(self::motion_direction::MotionDirection::default()),
         ])
     }
 
@@ -53,7 +52,9 @@ pub struct Smoothing {
     algs: Algs,
     current_id: usize,
 
-    pub horizon_lock: horizon::HorizonLock
+    pub horizon_lock: horizon::HorizonLock,
+    #[serde(skip)]
+    pub motion_direction: Option<MotionDirection>,
 }
 unsafe impl Send for Smoothing { }
 unsafe impl Sync for Smoothing { }
@@ -66,6 +67,7 @@ impl Default for Smoothing {
             current_id: 1,
 
             horizon_lock: horizon::HorizonLock::default(),
+            motion_direction: None,
         }
     }
 }
@@ -75,6 +77,7 @@ impl Clone for Smoothing {
         let mut ret = Self::default();
         ret.current_id = self.current_id;
         ret.horizon_lock = self.horizon_lock.clone();
+        ret.motion_direction = if let Some(md) = &self.motion_direction { Some(md.clone()) } else { None };
 
         let parameters = self.current().get_parameters_json();
         if let serde_json::Value::Array(ref arr) = parameters {
@@ -112,6 +115,8 @@ impl Smoothing {
         hasher.write_usize(self.current_id);
         hasher.write_u64(self.algs.0[self.current_id].get_checksum());
         hasher.write_u64(self.horizon_lock.get_checksum());
+        hasher.write_u8(self.motion_direction.is_some() as u8);
+        if let Some(md) = &self.motion_direction { hasher.write_u64(md.get_checksum()); }
         hasher.finish()
     }
 
@@ -119,6 +124,22 @@ impl Smoothing {
         self.algs.0.iter().map(|x| x.get_name()).collect()
     }
 
+    // Motion direction helpers (exposed to lib/controller)
+    pub fn get_motion_direction_params_json(&self) -> serde_json::Value {
+        match &self.motion_direction { Some(md) => md.get_parameters_json(), None => serde_json::Value::Array(vec![]) }
+    }
+    pub fn get_motion_direction_status_json(&self) -> serde_json::Value {
+        match &self.motion_direction { Some(md) => md.get_status_json(), None => serde_json::Value::Array(vec![]) }
+    }
+    pub fn set_motion_direction_param(&mut self, name: &str, val: f64) {
+        if self.motion_direction.is_none() {
+            self.motion_direction = Some(MotionDirection::default());
+        }
+        if let Some(md) = &mut self.motion_direction { md.set_parameter(name, val); }
+    }
+}
+
+impl Smoothing {
     pub fn get_trimmed_quats<'a>(quats: &'a TimeQuat, duration_ms: f64, trim_range_only: bool, trim_ranges: &[(f64, f64)]) -> Cow<'a, TimeQuat> {
         if trim_range_only && !trim_ranges.is_empty() {
             let mut quats_copy = quats.clone();

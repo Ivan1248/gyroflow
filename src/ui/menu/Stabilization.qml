@@ -438,6 +438,78 @@ MenuItem {
         }
     }
 
+    CheckBoxWithContent {
+        id: motionDirCb;
+        text: qsTr("Motion direction alignment");
+        cb.onCheckedChanged: {
+            controller.set_motion_direction_alignment(cb.checked);
+        }
+
+        // Parameters
+        Column {
+            width: parent.width;
+            spacing: 2 * dpiScale;
+            visible: motionDirCb.cb.checked;
+
+            Label {
+                text: qsTr("Min inlier ratio");
+                SliderWithField {
+                    id: mdMinInlier;
+                    from: 0.0; to: 1.0; value: 0.2; precision: 3;
+                    width: parent.width;
+                    onValueChanged: controller.set_motion_direction_param("min_inlier_ratio", value);
+                }
+            }
+            Label {
+                text: qsTr("Max epipolar error");
+                SliderWithField {
+                    id: mdMaxErr;
+                    from: 0.0; to: 5.0; value: 2.0; precision: 3;
+                    width: parent.width;
+                    onValueChanged: controller.set_motion_direction_param("max_epi_err", value);
+                }
+            }
+        }
+
+        // Status messages
+        Column {
+            id: mdStatus
+            width: parent.width;
+            spacing: 2 * dpiScale;
+            visible: motionDirCb.cb.checked;
+            function refresh() {
+                const status = controller.get_motion_direction_status();
+                for (let i = children.length; i > 0; --i) children[i - 1].destroy();
+
+                if (status.length > 0) {
+                    let qml = "import QtQuick; import '../components/'; Column { width: parent.width; ";
+                    for (const x of status) {
+                        switch (x.type) {
+                            case 'Label': {
+                                let text = qsTranslate("Stabilization", x.text).replace(/\n/g, "<br>");
+                                if (x.text_args) {
+                                    for (const arg of x.text_args) text = text.arg(arg);
+                                }
+                                qml += `BasicText { width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.StyledText; text: "${text}" }`;
+                                break;
+                            }
+                            case 'QML':
+                                qml += x.custom_qml;
+                                break;
+                        }
+                    }
+                    qml += "}";
+                    Qt.createQmlObject(qml, mdStatus);
+                }
+            }
+            Connections {
+                target: controller;
+                // TODO: improve triggers and conditions
+                function onCompute_progress(id, progress) { if (progress >= 0.0) { mdStatus.refresh(); } }
+            }
+        }
+    }
+
     InfoMessageSmall {
         id: maxValues;
         property real maxPitch: 0;
