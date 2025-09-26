@@ -7,7 +7,7 @@ pub mod plain;
 pub mod fixed;
 pub mod default_algo;
 mod motion_direction;
-pub use motion_direction::MotionDirection;
+pub use motion_direction::MotionDirectionAlignment;
 
 pub use nalgebra::*;
 use super::gyro_source::{ TimeQuat, Quat64 };
@@ -54,7 +54,7 @@ pub struct Smoothing {
 
     pub horizon_lock: horizon::HorizonLock,
     #[serde(skip)]
-    pub motion_direction: Option<MotionDirection>,
+    pub motion_direction: Option<MotionDirectionAlignment>,
 }
 unsafe impl Send for Smoothing { }
 unsafe impl Sync for Smoothing { }
@@ -133,7 +133,7 @@ impl Smoothing {
     }
     pub fn set_motion_direction_param(&mut self, name: &str, val: f64) {
         if self.motion_direction.is_none() {
-            self.motion_direction = Some(MotionDirection::default());
+            self.motion_direction = Some(MotionDirectionAlignment::default());
         }
         if let Some(md) = &mut self.motion_direction { md.set_parameter(name, val); }
     }

@@ -1189,7 +1189,7 @@ impl StabilizationManager {
 
     pub fn set_motion_direction_alignment(&self, enabled: bool) {
         let mut s = self.smoothing.write();
-        s.motion_direction = if enabled { Some(crate::smoothing::MotionDirection::default()) } else { None };
+        s.motion_direction = if enabled { Some(crate::smoothing::MotionDirectionAlignment::default()) } else { None };
         drop(s);
         self.invalidate_smoothing();
     }

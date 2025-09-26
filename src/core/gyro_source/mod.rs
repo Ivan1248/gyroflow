@@ -588,7 +588,7 @@ impl GyroSource {
         }
     }
 
-    pub fn recompute_smoothness(&self, alg: &dyn SmoothingAlgorithm, horizon_lock: super::smoothing::horizon::HorizonLock, motion_direction: Option<&super::smoothing::MotionDirection>, compute_params: &crate::ComputeParams) -> (TimeQuat, (f64, f64, f64)) {
+    pub fn recompute_smoothness(&self, alg: &dyn SmoothingAlgorithm, horizon_lock: super::smoothing::horizon::HorizonLock, motion_direction: Option<&super::smoothing::MotionDirectionAlignment>, compute_params: &crate::ComputeParams) -> (TimeQuat, (f64, f64, f64)) {
         let file_metadata = self.file_metadata.read();
         let mut smoothed_quaternions = self.quaternions.clone();
 

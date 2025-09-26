@@ -4,14 +4,14 @@
 use super::*;
 use std::sync::Mutex;
 
-pub struct MotionDirection {
+pub struct MotionDirectionAlignment {
     pub min_inlier_ratio: f64,
     pub max_epi_err: f64,
     pub flip_backward_dir: bool,
     status: Mutex<Vec<serde_json::Value>>,
 }
 
-impl Default for MotionDirection {
+impl Default for MotionDirectionAlignment {
     fn default() -> Self {
         Self {
             min_inlier_ratio: 0.2,
@@ -25,7 +25,7 @@ impl Default for MotionDirection {
     }
 }
 
-impl Clone for MotionDirection {
+impl Clone for MotionDirectionAlignment {
     fn clone(&self) -> Self {
         let status = self.status.lock().unwrap().clone();
         Self {
@@ -37,7 +37,7 @@ impl Clone for MotionDirection {
     }
 }
 
-impl MotionDirection {
+impl MotionDirectionAlignment {
     pub fn set_parameter(&mut self, name: &str, val: f64) {
         match name {
             "min_inlier_ratio" => self.min_inlier_ratio = val,
@@ -91,7 +91,7 @@ impl MotionDirection {
         //}
         // Check if pose estimator has any motion data
         if compute_params.pose_estimator.sync_results.try_read().map_or(true, |sr| !sr.values().any(|fr| fr.transl_dir.is_some())) {
-            *self.status.lock().unwrap() = MotionDirection::default().status.lock().unwrap().clone();
+            *self.status.lock().unwrap() = MotionDirectionAlignment::default().status.lock().unwrap().clone();
             return quats.clone();
         }
 
