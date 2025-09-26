@@ -55,8 +55,8 @@ install-deps:
     if [ ! -f "{{OpenCVPath}}/lib/libopencv_core4.a" ]; then
         echo "Installing OpenCV from vcpkg"
         # Install OpenCV
-        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics,imgcodecs,png]:x64-osx" --cmake-args=-DVCPKG_BUILD_TYPE=release
-        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics,imgcodecs,png]:arm64-osx" --cmake-args=-DVCPKG_BUILD_TYPE=release
+        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics,png]:x64-osx" --cmake-args=-DVCPKG_BUILD_TYPE=release
+        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics,png]:arm64-osx" --cmake-args=-DVCPKG_BUILD_TYPE=release
         rm -rf ./vcpkg/buildtrees
         rm -rf ./vcpkg/downloads
     fi
