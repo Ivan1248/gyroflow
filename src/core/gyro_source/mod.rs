@@ -70,6 +70,9 @@ pub struct GyroSource {
     pub integration_method: usize,
 
     pub quaternions: TimeQuat,
+    /// `smoothed_quaternions` are not the actual smoothed `quaternions`, but rather the quaternions 
+    /// that, when applied to the original orientation, produce the smoothed orientation.
+    /// See `actual_smoothed_quat_at_timestamp`` to get the actual smoothed quaternion.
     pub smoothed_quaternions: TimeQuat,
 
     pub use_gravity_vectors: bool,
@@ -891,7 +894,15 @@ impl GyroSource {
     }
 
     pub fn      org_quat_at_timestamp(&self, timestamp_ms: f64) -> Quat64 { self.quat_at_timestamp(&self.quaternions,          timestamp_ms) }
+    /// Returns the "smoothing quaternion" at the given timestamp, in milliseconds.
+    /// Note: This is not the actual smoothed orientation, unlike `actual_smoothed_quat_at_timestamp`.
+    /// TODO: Consider renaming this method to `smoothing_quat_at_timestamp` for clarity.
     pub fn smoothed_quat_at_timestamp(&self, timestamp_ms: f64) -> Quat64 { self.quat_at_timestamp(&self.smoothed_quaternions, timestamp_ms) }
+    pub fn actual_smoothed_quat_at_timestamp(&self, timestamp_ms: f64) -> Quat64 {
+        let quat_orig = self.quat_at_timestamp(&self.quaternions, timestamp_ms);
+        let quat_smoothing = self.quat_at_timestamp(&self.smoothed_quaternions, timestamp_ms);
+        (quat_smoothing / quat_orig).inverse()
+    }
 
     pub fn offset_at_timestamp(offsets: &BTreeMap<i64, f64>, timestamp_ms: f64) -> f64 {
         match offsets.len() {
