@@ -16,7 +16,8 @@ impl Default for MotionDirectionAlignment {
         Self {
             min_inlier_ratio: 0.2,
             max_epi_err: 2.0,
-            flip_backward_dir: false,
+            // TODO: flip_backward_dir=true is more stable when stationary, but looks in the reverse motion direction if going backward
+            flip_backward_dir: true,
             status: Mutex::new(vec![serde_json::json!({
                 "type": "Label",
                 "text": "Cannot apply motion direction alignment: vision-based motion direction data has not been computed."
@@ -95,20 +96,17 @@ impl MotionDirectionAlignment {
             return quats.clone();
         }
 
-        let sample_rate: f64 = quats.len() as f64 / (duration_ms / 1000.0);
-
         let mut out = TimeQuat::new();
 
         // Debug counters
-        let mut frames_total: usize = 0;
-        let mut targets_used: usize = 0;
-        let mut skipped_no_sample: usize = 0;
-        let mut skipped_no_gyro: usize = 0;
-        let mut skipped_degenerate: usize = 0;
+        let mut num_frames: usize = 0;
+        let mut num_targets_used: usize = 0;
+        let mut num_skipped: usize = 0;
+        let mut num_skipped_degenerate: usize = 0;
 
         // Iterate timestamps, blend towards motion direction look-at if quality OK, else keep gyro orientation
         for (ts, quat) in quats.iter() {
-            frames_total += 1;
+            num_frames += 1;
             
             // Get motion direction within window
             let window_us = 50_000_i64;
@@ -119,7 +117,7 @@ impl MotionDirectionAlignment {
                     let sign_correction = if tdir[2] <= 0.0 { /*forward*/ -1.0} else if self.flip_backward_dir {1.0} else {-1.0};
                     Some(sign_correction * nalgebra::Vector3::new(tdir[0], tdir[1], tdir[2]))
                 } else { None }
-            } else { skipped_no_sample += 1; None };
+            } else { num_skipped += 1; None };
 
             let target = if let Some(motion_dir) = motion_dir_opt {
                 // Rotate current camera orientation so its local Z axis aligns with motion direction (-tdir is in camera coords)
@@ -127,21 +125,18 @@ impl MotionDirectionAlignment {
                 if n > 1e-6 {
                     let ld = motion_dir / n;
                     // X = right, Y = up, Z = forward (left-handed)
-                    // For some reason, X has to be flipped to match the quaternion-to-image convention (yaw sign)
+                    // For some reason, X has to be flipped to match the quaternion-to-image convention
                     let look_direction = nalgebra::Vector3::<f64>::new(-ld.x, ld.y, ld.z);
-                    let z_axis = nalgebra::Vector3::<f64>::new(0.0, 0.0, 1.0);
-                    let delta = if let Some(q) = nalgebra::UnitQuaternion::rotation_between(&z_axis, &look_direction) {
-                        q
-                    } else {
-                        // 180° rotation around any axis orthogonal to Z; choose X
-                        nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::<f64>::x_axis(), std::f64::consts::PI)
-                    };
-                    Some(*quat * delta)
-                } else { skipped_degenerate += 1; None }
+                    // Derive world-space up from current orientation to preserve roll.
+                    let dir_world = *quat * look_direction;
+                    let up_world = *quat * nalgebra::Vector3::<f64>::new(0.0, 1.0, 0.0);
+                    let target_q = nalgebra::UnitQuaternion::face_towards(&dir_world, &up_world);
+                    Some(target_q)
+                } else { num_skipped_degenerate += 1; None }
             } else { None };
 
             let new_q = if let Some(target_q) = target { 
-                targets_used += 1;
+                num_targets_used += 1;
                 quat.slerp(&target_q, 1.0) 
             } else { *quat };
             out.insert(*ts, new_q);
@@ -149,34 +144,28 @@ impl MotionDirectionAlignment {
 
         // Store status for UI
         let mut msgs: Vec<serde_json::Value> = Vec::new();
-        if frames_total > 0 {
-            let used_percent = (targets_used as f64 * 100.0 / frames_total as f64).round();
+        if num_frames > 0 {
+            let used_percent = (num_targets_used as f64 * 100.0 / num_frames as f64).round();
             msgs.push(serde_json::json!({
                 "type": "Label",
-                "text": format!("Motion direction: used {}% of frames ({} / {})", used_percent as i64, targets_used, frames_total)
+                "text": format!("Motion direction: used {}% of frames ({} / {})", used_percent as i64, num_targets_used, num_frames)
             }));
-            if targets_used == 0 {
+            if num_targets_used == 0 {
                 msgs.push(serde_json::json!({
                     "type": "Label",
                     "text": "No valid motion directions found within the window. Consider increasing the window or adjusting pose estimation method."
                 }));
             }
-            if skipped_no_sample > 0 {
+            if num_skipped > 0 {
                 msgs.push(serde_json::json!({
                     "type": "Label",
-                    "text": format!("No motion sample near timestamp for {} frames. Increase motion window.", skipped_no_sample)
+                    "text": format!("No motion sample near timestamp for {} frames. Increase motion window.", num_skipped)
                 }));
             }
-            if skipped_no_gyro > 0 {
+            if num_skipped_degenerate > 0 {
                 msgs.push(serde_json::json!({
                     "type": "Label",
-                    "text": format!("No gyro orientation near timestamp for {} frames.", skipped_no_gyro)
-                }));
-            }
-            if skipped_degenerate > 0 {
-                msgs.push(serde_json::json!({
-                    "type": "Label",
-                    "text": format!("Degenerate motion direction for {} frames.", skipped_degenerate)
+                    "text": format!("Degenerate motion direction for {} frames.", num_skipped_degenerate)
                 }));
             }
         }
