@@ -18,6 +18,7 @@ MenuItem {
     property alias hasRawGyro: integrator.hasRawGyro;
     property alias integrationMethod: integrator.currentIndex;
     property alias orientationIndicator: orientationIndicator;
+    property alias gpsMap: gpsMap;
     property bool allMetadata: allMetadataCb.visible && allMetadataCb.checked;
     property string filename: "";
     property string detectedFormat: "";
@@ -160,6 +161,19 @@ MenuItem {
         anchors.horizontalCenter: parent.horizontalCenter;
         onClicked: fileDialog.open2();
     }
+    Button {
+        text: qsTr("Load GPX");
+        iconName: "file-empty"
+        anchors.horizontalCenter: parent.horizontalCenter;
+        onClicked: gpxDialog.open2();
+    }
+    FileDialog {
+        id: gpxDialog;
+        title: qsTr("Choose a GPX file");
+        nameFilters: [qsTr("GPS Exchange Format") + " (*.gpx)"];
+        type: "video";
+        onAccepted: controller.load_gpx(selectedFile);
+    }
     InfoMessageSmall {
         show: Qt.platform.os == "android" && !root.detectedFormat && root.lastSelectedFile.toString();
         type: InfoMessage.Info;
@@ -186,8 +200,33 @@ MenuItem {
 
         model: ({
             "File name": "---",
-            "Detected format": "---"
+            "Detected format": "---",
+            "GPX status": "---"
         })
+    }
+    Timer {
+        id: gpxStatusTimer;
+        interval: 500;
+        running: true;
+        repeat: true;
+        onTriggered: {
+            const s = controller.get_gpx_summary();
+            if (s && s.loaded) {
+                let msg = s.points + " pts";
+                if (s.start_time !== undefined && s.epoch_end_s !== undefined) {
+                    msg += ", " + new Date(s.start_time*1000).toISOString() + " → " + new Date(s.epoch_end_s*1000).toISOString();
+                }
+                if (s.overlap_ms !== undefined) {
+                    const ms = Math.round(s.overlap_ms);
+                    const mm = Math.floor(ms/60000); 
+                    const ss = Math.floor((ms%60000)/1000);
+                    msg += ", overlap " + mm + ":" + ("0"+ss).slice(-2);
+                }
+                info.updateEntry("GPX status", msg);
+            } else {
+                info.updateEntry("GPX status", "---");
+            }
+        }
     }
     Label {
         position: Label.LeftPosition;
@@ -672,6 +711,150 @@ MenuItem {
         }
     }
 
+    // GPS section (gated by has_gps())
+    Column {
+        id: gpsSection;
+        width: parent.width;
+        spacing: 6 * dpiScale;
+        visible: controller.has_gps();
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("GPS sync mode")
+
+            ComboBox {
+                id: gpsSyncMode;
+                model: [qsTr("Off"), qsTr("Auto"), qsTr("Manual")];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: controller.get_gps_sync_mode();
+                onCurrentIndexChanged: {
+                    controller.set_gps_sync_mode(currentIndex);
+                    currentIndex = controller.get_gps_sync_mode();
+                }
+            }
+        }
+        Label {
+            visible: gpsSyncMode.currentIndex === 2;
+            position: Label.LeftPosition;
+            text: qsTr("GPS offset")
+
+            Row {
+                id: gpsOffsetRow;
+                spacing: 6 * dpiScale;
+                NumberField {
+                    id: gpsOffset;
+                    width: Math.max(120 * dpiScale, root.width - 350 * dpiScale);
+                    height: 25 * dpiScale;
+                    precision: 3;
+                    unit: qsTr("s");
+                    value: controller.get_gps_offset_ms() / 1000.0;
+                    enabled: gpsSyncMode.currentIndex === 2;
+                    onEditingFinished: if (gpsSyncMode.currentIndex === 2) controller.set_gps_offset_ms(value * 1000.0);
+
+                    Connections {
+                        target: controller;
+                        function onGps_offset_changed() {
+                            gpsOffset.value = controller.get_gps_offset_ms() / 1000.0;
+                        }
+                    }
+                }
+            }
+        }
+        InfoMessageSmall {
+            show: true;
+            type: InfoMessage.Info;
+            text: {
+                const modes = [qsTr("Off"), qsTr("Auto"), qsTr("Manual")];
+                const mode = modes[gpsSyncMode.currentIndex] || qsTr("Off");
+                const anchor = controller.get_gps_anchor();
+                const overlap = controller.get_gps_overlap();
+                const off = controller.get_gps_offset_ms() / 1000.0;
+                
+                let t = qsTr("GPS sync: %1").arg(mode);
+                t += qsTr(", offset: %1 s").arg(off.toFixed(3));
+                t += qsTr(", anchor: %1").arg(anchor);
+                t += qsTr(", overlap: %1%").arg((overlap * 100).toFixed(1));
+                
+                if (overlap <= 0.0) {
+                    t += " — " + qsTr("No overlap; relative timeline");
+                }
+                t;
+            }
+        }
+        CheckBoxWithContent {
+            id: gpsMapCheckbox;
+            text: qsTr("GPS map");
+            onCheckedChanged: { if (gpsMapCheckbox.checked) gpsMap.refreshPolyline(); Qt.callLater(gpsMap.requestPaint); }
+        }
+        Canvas {
+            id: gpsMap
+            width: parent.width
+            height: parent.width * 0.75
+            visible: gpsMapCheckbox.checked
+            property var poly: []
+            property var cur: []
+
+            function refreshPolyline(): void {
+                poly = controller.get_gps_polyline(300);
+                requestPaint();
+            }
+            function updatePosition(timestamp: real): void {
+                cur = controller.get_gps_current_xy(Math.round(timestamp));
+                requestPaint();
+            }
+
+            onPaint: {
+                if (!gpsMapCheckbox.checked) return;
+                let ctx = getContext("2d");
+                ctx.reset();
+
+                // Uses as much canvas as possible while preserving uniform scaling
+                let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+                for (let i = 0; i < poly.length; i++) {
+                    const px = poly[i][0]; const py = poly[i][1];
+                    if (px < minx) minx = px; if (px > maxx) maxx = px;
+                    if (py < miny) miny = py; if (py > maxy) maxy = py;
+                }
+                const pad = 6; // px margin
+                const dx = Math.max(1e-6, maxx - minx); 
+                const dy = Math.max(1e-6, maxy - miny);
+                const sx = (width  - 2 * pad) / dx; 
+                const sy = (height - 2 * pad) / dy;
+                const s  = Math.min(sx, sy);
+                const vx = (width  - s * dx) / 2 - s * minx; 
+                const vy = (height - s * dy) / 2 - s * miny;
+
+                if (poly && poly.length >= 2) {
+                    ctx.strokeStyle = style === "light" ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.5)";
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    for (let i = 0; i < poly.length; i++) {
+                        const x = s * poly[i][0] + vx;
+                        const y = s * poly[i][1] + vy;
+                        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                }
+
+                if (cur && cur.length >= 2) {
+                    const x = s * cur[0] + vx;
+                    const y = s * cur[1] + vy;
+                    ctx.fillStyle = styleAccentColor;
+                    ctx.beginPath(); ctx.arc(x, y, 5, 0, 2*Math.PI); ctx.fill();
+                }
+            }
+            Component.onCompleted: refreshPolyline()
+        }
+        Connections {
+            target: controller
+            function onChart_data_changed(): void {
+                gpsSection.visible = controller.has_gps();
+                if (gpsSection.visible && gpsMapCheckbox.checked) gpsMap.refreshPolyline();
+            }
+        }
+    }
+
     Row {
         anchors.horizontalCenter: parent.horizontalCenter;
         LinkButton {
@@ -702,6 +885,8 @@ MenuItem {
                                 controller.export_full_metadata(selectedFile, root.lastSelectedFile.toString()? root.lastSelectedFile : window.videoArea.loadedFileUrl);
                             } else if (exportData == "parsed") {
                                 controller.export_parsed_metadata(selectedFile);
+                            } else if (exportData === "gpx") {
+                                controller.export_synchronized_gpx(selectedFile);
                             } else {
                                 controller.export_gyro_data(selectedFile, exportData);
                             }
@@ -771,6 +956,17 @@ MenuItem {
                                 exportFileDialog.exportData = obj;
                                 exportFileDialog.open2();
                             });
+                        }
+                    }
+                    Action {
+                        text: qsTr("Export synchronized GPX");
+                        onTriggered: {
+                            const folder = filesystem.get_folder(root.lastSelectedFile.toString()? root.lastSelectedFile : window.videoArea.loadedFileUrl);
+                            const filename = root.filename.replace(/\.[^/.]+$/, ".gpx");
+                            exportFileDialog.selectedFile = filesystem.get_file_url(folder, filename, false);
+                            exportFileDialog.nameFilters = ["GPX (*.gpx)"];
+                            exportFileDialog.exportData = "gpx";
+                            exportFileDialog.open2();
                         }
                     }
                     Action {

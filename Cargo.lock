@@ -1761,6 +1761,7 @@ dependencies = [
  "bitflags 2.9.4",
  "bytemuck",
  "byteorder",
+ "chrono",
  "ciborium",
  "core-foundation-sys",
  "crc32fast",
@@ -1797,6 +1798,7 @@ dependencies = [
  "opencv",
  "parking_lot",
  "pollster",
+ "quick-xml",
  "rand 0.9.2",
  "rand_xoshiro 0.6.0",
  "rayon",
@@ -3273,6 +3275,16 @@ dependencies = [
  "cpp",
  "cpp_build",
  "semver",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]

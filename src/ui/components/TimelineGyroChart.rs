@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use gyroflow_core::gps::{ unwrap_angles_deg, GPSTrack };
+use gyroflow_core::gps::synchronization::resample_linear;
 use gyroflow_core::stabilization_params::StabilizationParams;
 use gyroflow_core::keyframes::{ KeyframeManager, KeyframeType };
 use qmetaobject::*;
@@ -33,6 +35,7 @@ struct Series {
 // viewMode 2: Magn only
 // viewMode 3: Quaternions
 // viewMode 3: Quaternions + smoothed quaternions
+// viewMode 4: GPS (Course/Yaw/Speed)
 
 #[derive(Default, QObject)]
 pub struct TimelineGyroChart {
@@ -54,7 +57,7 @@ pub struct TimelineGyroChart {
 
     series: [Series; 4+4+1+1],
 
-    sync_points: BTreeMap<i64, (f64, f64)>, // timestamp, (offset, fitted offset)
+    sync_points: BTreeMap<i64, (f64, f64)>,  // timestamp, (offset, fitted offset)
 
     gyro: Vec<ChartData<3>>,
     accl: Vec<ChartData<3>>,
@@ -70,6 +73,10 @@ pub struct TimelineGyroChart {
 
     gyro_max: Option<f64>,
     duration_ms: f64,
+
+    gps_course: Vec<ChartData<1>>,  // unwrapped (can be more than 360 degrees)
+    gps_yaw: Vec<ChartData<1>>,  // unwrapped
+    gps_speed: Vec<ChartData<1>>,
 }
 
 impl TimelineGyroChart {
@@ -83,19 +90,17 @@ impl TimelineGyroChart {
 
     pub fn setVScaleToVisibleArea(&mut self) {
         let rect = (self as &dyn QQuickItem).bounding_rect();
-        let mut min_height = f64::MAX;
-        let mut max_height = 0.0;
-        for serie in &mut self.series {
-            if serie.visible && !serie.lines.is_empty() {
-                for a in &serie.lines {
-                    for b in a {
-                        if b.pt1.x > 0.0 && b.pt1.x < rect.width &&
-                           b.pt2.x > 0.0 && b.pt2.x < rect.width {
-                            if b.pt1.y < min_height { min_height = b.pt1.y; }
-                            if b.pt2.y < min_height { min_height = b.pt2.y; }
-                            if b.pt1.y > max_height { max_height = b.pt1.y; }
-                            if b.pt2.y > max_height { max_height = b.pt2.y; }
-                        }
+        let mut min_height: f64 = f64::MAX;
+        let mut max_height: f64 = 0.0;
+
+        for serie in &self.series {
+            if !serie.visible { continue; }
+            for polyline in &serie.lines {
+                for segment in polyline {
+                    if segment.pt1.x > 0.0 && segment.pt1.x < rect.width &&
+                       segment.pt2.x > 0.0 && segment.pt2.x < rect.width {
+                        min_height = min_height.min(segment.pt1.y.min(segment.pt2.y));
+                        max_height = max_height.max(segment.pt1.y.max(segment.pt2.y));
                     }
                 }
             }
@@ -107,6 +112,59 @@ impl TimelineGyroChart {
         self.vscale = 0.9 / min_element.abs().max(max_element.abs());
 
         self.update();
+    }
+
+    fn populate_gps_charts_from_track(
+        &mut self,
+        track: &GPSTrack,
+        gyro: &GyroSource,
+        offset_ms: f64,
+        video_duration_ms: f64,
+    ) {
+        if track.time.is_empty() { return; }
+
+        let course = track.course_deg();
+        let speed = track.speed();
+
+        let mut times_ms: Vec<f64> = track.time.iter().map(|t| *t * 1000.0 + offset_ms).collect();
+        if times_ms.is_empty() { return; }
+
+        let mut t0 = 0.0_f64.max(*times_ms.first().unwrap());
+        let mut t1 = video_duration_ms.min(*times_ms.last().unwrap());
+
+        if t1 <= t0 {
+            times_ms = track.time.iter().map(|t| (*t - track.get_start_time().unwrap()) * 1000.0 + offset_ms).collect();
+            if times_ms.is_empty() { return; }
+            t0 = 0.0;
+            t1 = video_duration_ms.min(times_ms.last().copied().unwrap_or(0.0).max(0.0));
+            if t1 <= t0 { return; }
+        }
+
+        let sample_rate_hz = 10.0;
+        
+        // Unwrap angles BEFORE resampling to avoid interpolation issues at 360°/0° boundary
+        let course_unwrapped_orig = unwrap_angles_deg(&course);
+        let (times_u, course_unwrapped) = resample_linear(&times_ms, &course_unwrapped_orig, t0, t1, sample_rate_hz);
+        let (_, speed_u) = resample_linear(&times_ms, &speed, t0, t1, sample_rate_hz);
+
+        if times_u.is_empty() { return; }
+
+        let yaw_raw: Vec<f64> = times_u.iter().map(|t| {
+            let (_r, _p, yaw) = gyro.org_quat_at_timestamp(*t).euler_angles();
+            yaw.to_degrees()
+        }).collect();
+
+        let yaw_unwrapped = unwrap_angles_deg(&yaw_raw);
+
+        for (t, v) in times_u.iter().zip(course_unwrapped.iter()) {
+            self.gps_course.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
+        }
+        for (t, v) in times_u.iter().zip(yaw_unwrapped.iter()) {
+            self.gps_yaw.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
+        }
+        for (t, v) in times_u.iter().zip(speed_u.iter()) {
+            self.gps_speed.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
+        }
     }
 
     pub fn update(&mut self) {
@@ -321,13 +379,24 @@ impl TimelineGyroChart {
         }
     }
 
-    pub fn setFromGyroSource(&mut self, gyro: &GyroSource, params: &StabilizationParams, keyframes: &KeyframeManager, series: &str) {
+    pub fn setFromGyroSource(
+        &mut self,
+        gyro: &GyroSource,
+        params: &StabilizationParams,
+        keyframes: &KeyframeManager,
+        gps_track: Option<GPSTrack>,
+        gps_offset_ms: f64,
+        series: &str,
+    ) {
         if series.is_empty() {
             self.gyro.clear();
             self.accl.clear();
             self.magn.clear();
             self.quats.clear();
             self.smoothed_quats.clear();
+            self.gps_course.clear();
+            self.gps_yaw.clear();
+            self.gps_speed.clear();
             self.sync_points = gyro.get_offsets_plus_linear();
 
             {
@@ -389,6 +458,14 @@ impl TimelineGyroChart {
                 }
                 add_quats(&org_smoothed_quats, &mut self.smoothed_quats);
             }
+            if self.viewMode == 4 {
+                self.gps_course.clear();
+                self.gps_yaw.clear();
+                self.gps_speed.clear();
+                if let Some(track) = gps_track.as_ref() {
+                    self.populate_gps_charts_from_track(track, gyro, gps_offset_ms, self.duration_ms);
+                }
+            }
 
             match self.viewMode {
                 0 => { self.gyro_max = Self::normalize_height(&mut self.gyro, None); },
@@ -397,6 +474,31 @@ impl TimelineGyroChart {
                 3 => {
                     let qmax = Self::normalize_height(&mut self.quats, None);
                     Self::normalize_height(&mut self.smoothed_quats, qmax);
+                },
+                4 => {
+                    if !self.gps_course.is_empty() && !self.gps_yaw.is_empty() {
+                        // Calculate means for centering
+                        let course_mean = self.gps_course.iter().map(|x| x.values[0]).sum::<f64>() / self.gps_course.len() as f64;
+                        let yaw_mean = self.gps_yaw.iter().map(|x| x.values[0]).sum::<f64>() / self.gps_yaw.len() as f64;
+                        let center_offset = course_mean - yaw_mean;
+                        
+                        // Center yaw around course
+                        for yaw_data in self.gps_yaw.iter_mut() {
+                            yaw_data.values[0] += center_offset;
+                        }
+                        
+                        // Normalize both to same scale
+                        let max_abs = |data: &Vec<ChartData<1>>| data.iter().map(|x| x.values[0].abs()).fold(0.0, f64::max);
+                        let max_angle = max_abs(&self.gps_course).max(max_abs(&self.gps_yaw));
+                        let _ = Self::normalize_height(&mut self.gps_course, Some(max_angle));
+                        let _ = Self::normalize_height(&mut self.gps_yaw, Some(max_angle));
+
+                        if !self.gps_speed.is_empty() {
+                            let max_speed = self.gps_speed.iter().map(|x| x.values[0]).fold(0.0, f64::max);
+                            // Speeds are scaled to to match the angle range [0..360)
+                            let _ = Self::normalize_height(&mut self.gps_speed, Some(max_speed * 1.0f64.max(max_angle / 360.0)));
+                        }
+                    }
                 },
                 _ => { }
             }
@@ -480,6 +582,12 @@ impl TimelineGyroChart {
                     self.series[5].data = Self::get_serie_vector(&self.smoothed_quats, 1);
                     self.series[6].data = Self::get_serie_vector(&self.smoothed_quats, 2);
                     self.series[7].data = Self::get_serie_vector(&self.smoothed_quats, 3);
+                }
+                4 => { // GPS (Course/Yaw/Speed)
+                    self.series[0].data = Self::get_serie_vector(&self.gps_course, 0); // course deg
+                    self.series[1].data = Self::get_serie_vector(&self.gps_yaw, 0);    // imu yaw deg
+                    self.series[2].data = Self::get_serie_vector(&self.gps_speed, 0);  // speed m/s
+                    self.series[3].data.clear();
                 }
                 _ => panic!("Invalid view mode")
             }

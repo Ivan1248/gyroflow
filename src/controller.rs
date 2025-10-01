@@ -307,6 +307,22 @@ pub struct Controller {
     ongoing_computations: BTreeSet<u64>,
 
     pub stabilizer: Arc<StabilizationManager>,
+
+    load_gpx: qt_method!(fn(&self, url: QUrl)),
+    export_synchronized_gpx: qt_method!(fn(&self, url: QUrl)),
+    get_gpx_summary: qt_method!(fn(&self) -> QJsonObject),
+    get_gps_offset_ms: qt_method!(fn(&self) -> f64),
+    set_gps_offset_ms: qt_method!(fn(&self, offset_ms: f64)),
+    clear_gps: qt_method!(fn(&self)),
+    get_gps_sync_mode: qt_method!(fn(&self) -> i32),
+    set_gps_sync_mode: qt_method!(fn(&self, mode: i32)),
+    get_gps_sync_quality: qt_method!(fn(&self) -> f64),
+    get_gps_anchor: qt_method!(fn(&self) -> QString),
+    get_gps_overlap: qt_method!(fn(&self) -> f64),
+    has_gps: qt_method!(fn(&self) -> bool),
+    get_gps_polyline: qt_method!(fn(&self, max_points: usize) -> QJsonArray),
+    get_gps_current_xy: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
+    gps_offset_changed: qt_signal!(),
 }
 
 impl Controller {
@@ -609,7 +625,9 @@ impl Controller {
             if let Some(gyro) = self.stabilizer.gyro.try_read() {
                 if let Some(params) = self.stabilizer.params.try_read() {
                     if let Some(keyframes) = self.stabilizer.keyframes.try_read() {
-                        chart.setFromGyroSource(&gyro, &params, &keyframes, &series);
+                        let gps_track = self.stabilizer.get_gps_track();
+                        let gps_offset_ms = self.stabilizer.get_gps_offset_ms();
+                        chart.setFromGyroSource(&gyro, &params, &keyframes, gps_track, gps_offset_ms, &series);
                         return true;
                     }
                 }
@@ -1533,6 +1551,180 @@ impl Controller {
         let q = gyro.org_quat_at_timestamp(ts);
         QVariantList::from_iter(&[q.w, q.i, q.j, q.k, sq.w, sq.i, sq.j, sq.k]) // scalar first
     }
+
+    fn get_gps_polyline(&self, max_points: usize) -> QJsonArray {
+        use crate::util::serde_json_to_qt_array;
+
+        let track_opt = self.stabilizer.get_gps_track();
+        let Some(track) = track_opt.as_ref() else { return QJsonArray::default(); };
+        let n = track.len();
+        if n < 2 { return QJsonArray::default(); }
+
+        let max_points = max_points.max(2);
+
+        let lat0 = track.lat[0].to_radians();
+        let lon0 = track.lon[0].to_radians();
+        let r_earth = 6_371_000.0_f64;
+
+        let mut xs: Vec<f64> = Vec::with_capacity(n);
+        let mut ys: Vec<f64> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lat = track.lat[i].to_radians();
+            let lon = track.lon[i].to_radians();
+            let dx = (lon - lon0) * lat0.cos() * r_earth;
+            let dy = (lat - lat0) * r_earth;
+            xs.push(dx);
+            ys.push(dy);
+        }
+        let (minx, maxx) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        let (miny, maxy) = ys.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        let cx = (minx + maxx) * 0.5;
+        let cy = (miny + maxy) * 0.5;
+        let max_range = (maxx - minx).abs().max((maxy - miny).abs()).max(1e-6);
+
+        // Downsample by step to limit payload
+        let step = (n as f64 / max_points as f64).ceil() as usize;
+        let mut out: Vec<[f64; 2]> = Vec::with_capacity((n + step - 1) / step);
+        let mut i = 0;
+        while i < n {
+            let x_norm = ((xs[i] - cx) / max_range) + 0.5;
+            let y_norm = ((cy - ys[i]) / max_range) + 0.5; // invert Y so north is up
+            out.push([x_norm, y_norm]);
+            i += step.max(1);
+        }
+        serde_json_to_qt_array(&serde_json::json!(out))
+    }
+
+    fn get_gps_current_xy(&self, timestamp_us: i64) -> QJsonArray {
+        use crate::util::serde_json_to_qt_array;
+
+        let track_opt = self.stabilizer.get_gps_track();
+        let Some(track) = track_opt.as_ref() else { return QJsonArray::default(); };
+        let n = track.len();
+        if n == 0 { return QJsonArray::default(); }
+
+        let t_ms = timestamp_us as f64 / 1000.0;
+        let off_ms = self.stabilizer.get_gps_offset_ms();
+        let t_s = (t_ms - off_ms) / 1000.0; // convert to GPSTrack time base (seconds)
+
+        // Binary search for interval
+        let mut lo = 0usize;
+        let mut hi = n - 1;
+        if t_s <= track.time[0] {
+            lo = 0; hi = 0;
+        } else if t_s >= track.time[n - 1] {
+            lo = n - 1; hi = n - 1;
+        } else {
+            while hi - lo > 1 { // invariant: track.time[lo] <= t_s <= track.time[hi]
+                let mid = (lo + hi) / 2;
+                if track.time[mid] <= t_s { lo = mid; } else { hi = mid; }
+            }
+        }
+
+        let (lat, lon) = if lo == hi {
+            (track.lat[lo], track.lon[lo])
+        } else {
+            let t0 = track.time[lo];
+            let t1 = track.time[hi];
+            let frac = ((t_s - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            let lat = track.lat[lo] + (track.lat[hi] - track.lat[lo]) * frac;
+            let lon = track.lon[lo] + (track.lon[hi] - track.lon[lo]) * frac;
+            (lat, lon)
+        };
+
+        // Project and normalize against full-track bounds (same as get_gps_polyline)
+        let lat0 = track.lat[0].to_radians();
+        let lon0 = track.lon[0].to_radians();
+        let r_earth = 6_371_000.0_f64;
+
+        // Precompute bounds
+        let mut minx = f64::INFINITY; let mut maxx = f64::NEG_INFINITY;
+        let mut miny = f64::INFINITY; let mut maxy = f64::NEG_INFINITY;
+        for i in 0..n {
+            let lat_i = track.lat[i].to_radians();
+            let lon_i = track.lon[i].to_radians();
+            let dx = (lon_i - lon0) * lat0.cos() * r_earth;
+            let dy = (lat_i - lat0) * r_earth;
+            minx = minx.min(dx); maxx = maxx.max(dx);
+            miny = miny.min(dy); maxy = maxy.max(dy);
+        }
+        let cx = (minx + maxx) * 0.5;
+        let cy = (miny + maxy) * 0.5;
+        let max_range = (maxx - minx).abs().max((maxy - miny).abs()).max(1e-6);
+
+        let lat_r = lat.to_radians();
+        let lon_r = lon.to_radians();
+        let dx = (lon_r - lon0) * lat0.cos() * r_earth;
+        let dy = (lat_r - lat0) * r_earth;
+        let x_norm = ((dx - cx) / max_range) + 0.5;
+        let y_norm = ((cy - dy) / max_range) + 0.5;
+
+        serde_json_to_qt_array(&serde_json::json!([x_norm, y_norm, lat, lon]))
+    }
+
+    fn has_gps(&self) -> bool {
+        self.stabilizer.get_gps_track().is_some()
+    }
+    // Load GPX file and subtracts video start time from the timestamps
+    fn load_gpx(&self, url: QUrl) {
+        let url = util::qurl_to_encoded(url);
+        if url.is_empty() { return; }
+        
+        // Fail if no video is loaded
+        let video_creation_time = self.stabilizer.params.read().video_created_at.unwrap_or(0) as f64;
+        
+        let file_path = filesystem::url_to_path(&url);
+        match gyroflow_core::gps::parse_gpx_file(&file_path) {
+            Ok(track) => {
+                self.stabilizer.set_gpx_track(track.with_subtracted_time(video_creation_time as f64));
+                self.chart_data_changed();
+            }
+            Err(err) => {
+                self.error(QString::from("An error occured: %1"), QString::from(err.to_string()), QString::default());
+            }
+        }
+    }
+    fn export_synchronized_gpx(&self, url: QUrl) {
+        let url = util::qurl_to_encoded(url);
+        if url.is_empty() { return; }
+        
+        let gps_source = self.stabilizer.gps.read();
+        let Some(track) = gps_source.track.as_ref() else { 
+            self.error(QString::from("An error occured: %1"), QString::from("No GPS track loaded"), QString::default());
+            return;
+        };
+        let video_start_time = self.stabilizer.params.read().video_created_at.unwrap_or(0) as f64;
+        // When exporting synchronized GPX, we apply the offset to get back to absolute epoch time
+        // This way, when the GPX is loaded again, the synchronization is preserved in the timestamps
+        let offset = gps_source.offset_ms / 1000.0;
+        let file_path = filesystem::url_to_path(&url);
+        if let Err(err) = gyroflow_core::gps::save_gpx_file(&file_path, video_start_time + offset, track) {
+            self.error(QString::from("An error occured: %1"), QString::from(err.to_string()), QString::default());
+        }
+    }
+    fn get_gpx_summary(&self) -> QJsonObject {
+        use crate::util::serde_json_to_qt_object;
+        serde_json_to_qt_object(&self.stabilizer.get_gpx_summary())
+    }
+
+    fn get_gps_offset_ms(&self) -> f64 { self.stabilizer.get_gps_offset_ms() }
+    fn set_gps_offset_ms(&self, offset_ms: f64) { self.stabilizer.set_gps_offset_ms(offset_ms); self.chart_data_changed(); }
+    fn clear_gps(&self) { self.stabilizer.clear_gps(); self.chart_data_changed(); }
+    fn get_gps_sync_mode(&self) -> i32 { self.stabilizer.get_gps_sync_mode() }
+    fn set_gps_sync_mode(&self, mode: i32) { 
+        let auto_sync_performed = self.stabilizer.set_gps_sync_mode(mode); 
+        self.chart_data_changed(); 
+        if auto_sync_performed {
+            // Auto synchronization was performed, emit signal again to update the offset textbox
+            self.chart_data_changed();
+        }
+        // Emit GPS offset changed signal to update the textbox
+        self.gps_offset_changed();
+    }
+    fn get_gps_sync_quality(&self) -> f64 { self.stabilizer.get_gps_sync_quality() }
+    fn get_gps_anchor(&self) -> QString { QString::from(self.stabilizer.get_gps_anchor()) }
+    fn get_gps_overlap(&self) -> f64 { self.stabilizer.get_gps_overlap() }
+    
     fn mesh_at_frame(&self, frame: usize) -> QVariantList {
         let gyro = self.stabilizer.gyro.read();
         let file_metadata = gyro.file_metadata.read();

@@ -2,6 +2,7 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 pub mod gyro_source;
+pub mod gps;
 pub mod imu_integration;
 pub mod lens_profile;
 pub mod lens_profile_database;
@@ -107,6 +108,8 @@ pub struct StabilizationManager {
     pub params: Arc<RwLock<StabilizationParams>>,
 
     pub sync_data: Arc<RwLock<SyncData>>,
+
+    pub gps: Arc<RwLock<crate::gps::source::GpsSource>>,
 }
 
 impl Default for StabilizationManager {
@@ -145,11 +148,74 @@ impl Default for StabilizationManager {
             camera_id: Arc::new(RwLock::new(None)),
 
             sync_data: Arc::new(RwLock::new(SyncData::default())),
+
+            gps: Arc::new(RwLock::new(crate::gps::source::GpsSource::default())),
         }
     }
 }
 
 impl StabilizationManager {
+    // ---------------- GPS façade ----------------
+    pub fn set_gpx_track(&self, track: crate::gps::GPSTrack) {
+        let mut gps = self.gps.write();
+        gps.set_track(track);
+    }
+    pub fn get_gpx_summary(&self) -> serde_json::Value {
+        self.gps.read().summary_json(self.params.read().duration_ms)
+    }
+    pub fn get_gps_offset_ms(&self) -> f64 { self.gps.read().offset_ms }
+    pub fn set_gps_offset_ms(&self, offset_ms: f64) { self.gps.write().offset_ms = offset_ms; }
+    pub fn clear_gps(&self) { self.gps.write().clear(); }
+    pub fn get_gps_sync_mode(&self) -> i32 {
+        match self.gps.read().sync_mode { crate::gps::source::GPSSyncMode::Off => 0, crate::gps::source::GPSSyncMode::Auto => 1, crate::gps::source::GPSSyncMode::Manual => 2 }
+    }
+    pub fn set_gps_sync_mode(&self, mode: i32) -> bool {
+        use crate::gps::source::GPSSyncMode as M;
+        let m = match mode { 1 => M::Auto, 2 => M::Manual, _ => M::Off };
+        let mut auto_sync_performed = false;
+        {
+            let mut gps = self.gps.write();
+            let prev = gps.sync_mode;
+            gps.set_sync_mode(m);
+            if m == M::Auto && prev != M::Auto {
+                // Try to refresh auto offset immediately using current params
+                if gps.sync_mode == crate::gps::source::GPSSyncMode::Auto { 
+                    let sample_rate_hz = 10.0;
+                    let max_offset = 20.0;
+                    gps.synchronize_with_gyro(&self.gyro.read(), sample_rate_hz, max_offset); 
+                    auto_sync_performed = true;
+                }
+            }
+        }
+        auto_sync_performed
+    }
+    pub fn get_gps_anchor(&self) -> String {
+        use crate::gps::source::TimeAlignment;
+        let gps = self.gps.read();
+        if let Some(track) = gps.track.as_ref() {
+            let alignment = TimeAlignment::compute(track, self.params.read().duration_ms, true, gps.offset_ms);
+            alignment.anchor.as_label().to_string()
+        } else {
+            "".to_string()
+        }
+    }
+    pub fn get_gps_overlap(&self) -> f64 {
+        use crate::gps::source::TimeAlignment;
+        let gps = self.gps.read();
+        if let Some(track) = gps.track.as_ref() {
+            let alignment = TimeAlignment::compute(track, self.params.read().duration_ms, true, gps.offset_ms);
+            alignment.overlap_ratio
+        } else {
+            0.0
+        }
+    }
+    pub fn get_gps_sync_quality(&self) -> f64 { 
+        // Quality could be based on overlap ratio, RMS error, etc.
+        // For now, return overlap ratio as a simple quality metric
+        self.get_gps_overlap()
+    }
+    pub fn get_gps_track(&self) -> Option<crate::gps::GPSTrack> { self.gps.read().track.clone() }
+    
     pub fn init_from_video_data(&self, duration_ms: f64, fps: f64, frame_count: usize, video_size: (usize, usize)) {
         {
             let mut params = self.params.write();
@@ -2125,6 +2191,21 @@ pub enum GyroflowCoreError {
 
     #[error("IO error {0:?}")]
     IOError(#[from] std::io::Error),
+
+    #[error("XML parsing error {0:?}")]
+    XMLParsingError(#[from] quick_xml::Error),
+
+    #[error("Chrono error {0:?}")]
+    ChronoError(#[from] chrono::ParseError),
+
+    #[error("GPX parsing error: {0}")]
+    GPXParsingError(String),
+
+    #[error("No GPS track loaded")]
+    NoGPSTrackLoaded,
+
+    #[error("GPX export error: {0}")]
+    GPXExportError(String),
 
     #[error("Unknown error")]
     Unknown
