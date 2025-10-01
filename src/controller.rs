@@ -60,6 +60,7 @@ pub struct Controller {
 
     set_of_method: qt_method!(fn(&self, v: u32)),
     start_autosync: qt_method!(fn(&mut self, timestamps_fract: String, sync_params: String, mode: String)),
+    compute_video_based_motion_estimates: qt_method!(fn(&mut self, sync_params: String)),
     update_chart: qt_method!(fn(&self, chart: QJSValue, series: String) -> bool),
     update_frequency_graph: qt_method!(fn(&self, graph: QJSValue, idx: usize, ts: f64, sr: f64, fft_size: usize)),
     update_keyframes_view: qt_method!(fn(&self, kfview: QJSValue)),
@@ -320,6 +321,7 @@ pub struct Controller {
     get_gps_anchor: qt_method!(fn(&self) -> QString),
     get_gps_overlap: qt_method!(fn(&self) -> f64),
     has_gps: qt_method!(fn(&self) -> bool),
+    has_motion_vectors: qt_method!(fn(&self) -> bool),
     get_gps_polyline: qt_method!(fn(&self, max_points: usize) -> QJsonArray),
     get_gps_current_xy: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
     gps_offset_changed: qt_signal!(),
@@ -401,6 +403,11 @@ impl Controller {
     }
     fn get_project_file_url(&self) -> QString {
         QString::from(self.stabilizer.input_file.read().project_file_url.as_ref().cloned().unwrap_or_default())
+    }
+
+    fn compute_video_based_motion_estimates(&mut self, sync_params: String) {
+        // Use empty timestamps_fract to trigger whole-video analysis
+        self.start_autosync("[]".into(), sync_params, "compute_video_based_motion_estimates".into());
     }
 
     // Overlaps with RenderQueue::do_autosync, TODO: refactor
@@ -1664,6 +1671,10 @@ impl Controller {
 
     fn has_gps(&self) -> bool {
         self.stabilizer.get_gps_track().is_some()
+    }
+    fn has_motion_vectors(&self) -> bool {
+        self.stabilizer.pose_estimator.sync_results.try_read()
+            .map_or(false, |sr| sr.values().any(|fr| fr.transl_dir.is_some()))
     }
     // Load GPX file and subtracts video start time from the timestamps
     fn load_gpx(&self, url: QUrl) {

@@ -24,6 +24,35 @@ MenuItem {
     property string detectedFormat: "";
     property url lastSelectedFile: "";
 
+    // Expose video motion settings for synchronization to access
+    property alias ofMethod: ofMethod.currentIndex;
+    property alias poseMethod: poseMethod.currentIndex;
+    property string poseMethodString: ["EssentialLMEDS", "EssentialRANSAC", "Almeida", "EightPoint", "Homography"][poseMethod.currentIndex] || "EssentialLMEDS";
+
+    // Function to trigger motion estimation (can be called from other QML files)
+    function runMotionEstimation(): void {
+        if (!window.videoArea.vid.loaded || controller.sync_in_progress) {
+            return;
+        }
+        const settings = {
+            "of_method": ofMethod.currentIndex,
+            "pose_method": ["EssentialLMEDS", "EssentialRANSAC", "Almeida", "EightPoint", "Homography"][poseMethod.currentIndex] || "EssentialLMEDS",
+            "every_nth_frame": everyNthFrame.value,
+            // Dummy values for required but unused params:
+            "initial_offset": 0,
+            "initial_offset_inv": false,
+            "search_size": 1.0,
+            "calc_initial_fast": false,
+            "max_sync_points": 1,
+            "time_per_syncpoint": 0.1,
+            "offset_method": 0,
+            "custom_sync_pattern": null,
+            "auto_sync_points": false,
+            "force_whole_video_analysis": false // Will be handled by the mode itself
+        };
+        controller.compute_video_based_motion_estimates(JSON.stringify(settings));
+    }
+
     FileDialog {
         id: fileDialog;
         property var extensions: [ "csv", "txt", "bbl", "bfl", "mp4", "mov", "mxf", "insv", "gcsv", "360", "log", "bin", "braw", "r3d", "gpmf", "crm" ];
@@ -1028,5 +1057,138 @@ MenuItem {
         anchors.bottomMargin: -35 * dpiScale;
         extensions: fileDialog.extensions;
         onLoadFile: (url) => root.loadFile(url)
+    }
+
+    Item {
+        id: videoMotionSett;
+        property alias processingResolution: processingResolution.currentIndex;
+        property alias ofMethod: ofMethod.currentIndex;
+        property alias poseMethod: poseMethod.currentIndex;
+        property alias everyNthFrame: everyNthFrame.value;
+        property alias showFeatures: showFeatures.checked;
+        property alias showOF: showOF.checked;
+        property alias showMotionDirection: showMotionDirection.checked;
+
+        Component.onCompleted: settings.init(videoMotionSett);
+        function propChanged() { settings.propChanged(videoMotionSett); }
+    }
+
+    Button {
+        text: qsTr("Estimate motion from video");
+        accent: false;
+        iconName: "video";
+        enabled: window.videoArea.vid.loaded && !controller.sync_in_progress;
+        onClicked: root.runMotionEstimation();
+    }
+
+    InfoMessageSmall {
+        text: qsTr("This will analyze the entire video to estimate camera motion from the image itself. The data can be used for motion direction alignment in the Stabilization section.");
+    }
+
+    AdvancedSection {
+        id: videoMotionAdvanced;
+        btn.text: qsTr("Advanced video motion settings");
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Processing resolution");
+            ComboBox {
+                id: processingResolution;
+                model: [QT_TRANSLATE_NOOP("Popup", "Full"), "1080p", "720p", "480p"];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: 3; // 480p default for better performance
+                onCurrentIndexChanged: {
+                    videoMotionSett.propChanged();
+                    let target_height = -1;
+                    switch (currentIndex) {
+                        case 1: target_height = 1080; break;
+                        case 2: target_height = 720; break;
+                        case 3: target_height = 480; break;
+                    }
+                    controller.set_processing_resolution(target_height);
+                }
+            }
+        }
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Optical flow method");
+            ComboBox {
+                id: ofMethod;
+                model: ["AKAZE", "PyrLK", "DIS"];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: 2; // DIS default
+                onCurrentIndexChanged: {
+                    videoMotionSett.propChanged();
+                    controller.set_of_method(currentIndex);
+                }
+            }
+        }
+
+        InfoMessageSmall {
+            show: ofMethod.currentValue == "AKAZE";
+            text: qsTr("The AKAZE method may be more accurate but is significantly slower than OpenCV methods. Use only if OpenCV doesn't produce good results");
+        }
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Pose method");
+            ComboBox {
+                id: poseMethod;
+                model: ["Essential (LMEDS)", "Essential (RANSAC)", "Almeida", "EightPoint", "findHomography"];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: 0; // Essential LMEDS default
+                onCurrentIndexChanged: videoMotionSett.propChanged();
+            }
+        }
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Analyze every N-th frame");
+            NumberField {
+                id: everyNthFrame;
+                value: 3;
+                defaultValue: 3;
+                from: 1;
+                to: 100;
+                precision: 0;
+                width: parent.width;
+                tooltip: qsTr("Higher values are faster but less accurate. 3-5 is a good balance for motion direction estimation.");
+                onValueChanged: videoMotionSett.propChanged();
+            }
+        }
+
+        CheckBox {
+            id: showFeatures;
+            text: qsTr("Show detected features");
+            checked: false;
+            onCheckedChanged: {
+                videoMotionSett.propChanged();
+                controller.show_detected_features = checked;
+            }
+        }
+
+        CheckBox {
+            id: showOF;
+            text: qsTr("Show optical flow");
+            checked: false;
+            onCheckedChanged: {
+                videoMotionSett.propChanged();
+                controller.show_optical_flow = checked;
+            }
+        }
+
+        CheckBox {
+            id: showMotionDirection;
+            text: qsTr("Show motion direction");
+            checked: true;
+            onCheckedChanged: {
+                videoMotionSett.propChanged();
+                controller.show_motion_direction = checked;
+            }
+        }
     }
 }

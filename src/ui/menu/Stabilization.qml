@@ -443,6 +443,10 @@ MenuItem {
         text: qsTr("Motion direction alignment");
         cb.onCheckedChanged: {
             controller.set_motion_direction_alignment(cb.checked);
+            // Auto-run motion estimation if enabled but no data available
+            if (cb.checked && !controller.has_motion_vectors()) {
+                window.motionData.runMotionEstimation();
+            }
         }
 
         // Parameters

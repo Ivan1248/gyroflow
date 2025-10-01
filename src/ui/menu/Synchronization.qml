@@ -15,7 +15,6 @@ MenuItem {
 
     Item {
         id: sett;
-        property alias processingResolution: processingResolution.currentIndex;
         property alias initialOffset: initialOffset.value;
         property alias syncSearchSize: syncSearchSize.value;
         property alias maxSyncPoints: maxSyncPoints.value;
@@ -27,8 +26,6 @@ MenuItem {
         // property alias syncMethod: syncMethod.currentIndex;
         // property alias offsetMethod: offsetMethod.currentIndex;
         // property alias poseMethod: poseMethod.currentIndex;
-        property alias showFeatures: showFeatures.checked;
-        property alias showOF: showOF.checked;
         // This is a specific use case and I don't think we should remember that setting, especially that it's hidden under "Advanced"
         //property alias everyNthFrame: everyNthFrame.value;
 
@@ -38,7 +35,6 @@ MenuItem {
 
     property alias timePerSyncpoint: timePerSyncpoint;
     property alias everyNthFrame: everyNthFrame;
-    property alias poseMethod: poseMethod;
     property var customSyncTimestamps: [];
     property var additionalSyncTimestamps: [];
 
@@ -52,11 +48,12 @@ MenuItem {
             if (o.hasOwnProperty("max_sync_points"))    maxSyncPoints.value                 = +o.max_sync_points;
             if (o.hasOwnProperty("every_nth_frame"))    everyNthFrame.value                 = +o.every_nth_frame;
             if (o.hasOwnProperty("time_per_syncpoint")) timePerSyncpoint.value              = +o.time_per_syncpoint;
-            if (o.hasOwnProperty("of_method"))          syncMethod.currentIndex             = +o.of_method;
-            if (o.hasOwnProperty("offset_method"))      offsetMethod.currentIndex           = +o.offset_method;
-            if (o.hasOwnProperty("pose_method"))        poseMethod.currentIndex             = +o.pose_method;
-            if (o.hasOwnProperty("custom_sync_pattern")) sync.customSyncTimestamps          = resolveSyncpointPattern(o.custom_sync_pattern);
-            if (o.hasOwnProperty("auto_sync_points")) experimentalAutoSyncPoints.checked    = !!o.auto_sync_points;
+            // Optical flow and pose method settings are now in Motion Data section
+            if (o.hasOwnProperty("of_method"))          window.motionData.ofMethod             = +o.of_method;
+            if (o.hasOwnProperty("offset_method"))      offsetMethod.currentIndex              = +o.offset_method;
+            if (o.hasOwnProperty("pose_method"))        window.motionData.poseMethod           = +o.pose_method;
+            if (o.hasOwnProperty("custom_sync_pattern")) sync.customSyncTimestamps             = resolveSyncpointPattern(o.custom_sync_pattern);
+            if (o.hasOwnProperty("auto_sync_points")) experimentalAutoSyncPoints.checked       = !!o.auto_sync_points;
             if (o.hasOwnProperty("force_whole_video_analysis")) forceWholeVideoAnalysis.checked = !!o.force_whole_video_analysis;
             if (o.hasOwnProperty("do_autosync") && o.do_autosync) autosyncTimer.doRun = true;
         }
@@ -81,9 +78,10 @@ MenuItem {
             "max_sync_points":    maxSyncPoints.value,
             "every_nth_frame":    everyNthFrame.value,
             "time_per_syncpoint": timePerSyncpoint.value,
-            "of_method":          syncMethod.currentIndex,
+            // Get optical flow and pose method from Motion Data section
+            "of_method":          window.motionData.ofMethod,
             "offset_method":      offsetMethod.currentIndex,
-            "pose_method":        ["EssentialLMEDS", "EssentialRANSAC", "Almeida", "EightPoint", "Homography"][poseMethod.currentIndex] || "EssentialLMEDS",
+            "pose_method":        window.motionData.poseMethodString,
             "auto_sync_points":   experimentalAutoSyncPoints.checked,
             "force_whole_video_analysis": forceWholeVideoAnalysis.checked,
         };
@@ -315,61 +313,6 @@ MenuItem {
             }
         }
         Label {
-            position: Label.LeftPosition;
-            text: qsTr("Processing resolution");
-            ComboBox {
-                id: processingResolution;
-                model: [QT_TRANSLATE_NOOP("Popup", "Full"), "4k", "1080p", "720p", "480p"];
-                font.pixelSize: 12 * dpiScale;
-                width: parent.width;
-                currentIndex: 3;
-                onCurrentIndexChanged: {
-                    let target_height = -1; // Full
-                    switch (currentIndex) {
-                        case 1: target_height = 2160; break;
-                        case 2: target_height = 1080; break;
-                        case 3: target_height = 720; break;
-                        case 4: target_height = 480; break;
-                    }
-
-                    controller.set_processing_resolution(target_height);
-                    render_queue.set_processing_resolution(target_height);
-                }
-            }
-        }
-        InfoMessageSmall {
-            show: syncMethod.currentValue == "AKAZE";
-            text: qsTr("The AKAZE method may be more accurate but is significantly slower than OpenCV. Use only if OpenCV doesn't produce good results");
-        }
-        Label {
-            position: Label.LeftPosition;
-            text: qsTr("Optical flow method");
-
-            ComboBox {
-                id: syncMethod;
-                model: ["AKAZE", "PyrLK", "DIS"];
-                font.pixelSize: 12 * dpiScale;
-                width: parent.width;
-                currentIndex: 2;
-                onCurrentIndexChanged: controller.set_of_method(currentIndex);
-                Component.onCompleted: currentIndexChanged();
-            }
-        }
-        Label {
-            text: qsTr("Pose method");
-            position: Label.LeftPosition;
-
-            ComboBox {
-                id: poseMethod;
-                // Expose both Essential matrix estimation variants (LMEDS and RANSAC)
-                model: ["Essential (LMEDS)", "Essential (RANSAC)", "Almeida", "EightPoint", "findHomography"];
-                font.pixelSize: 12 * dpiScale;
-                width: parent.width;
-                currentIndex: 0;
-                onCurrentIndexChanged: controller.set_pose_method(currentIndex);
-            }
-        }
-        Label {
             text: qsTr("Offset method");
             position: Label.LeftPosition;
 
@@ -404,24 +347,6 @@ MenuItem {
                     controller.set_sync_lpf(lpfcb.checked? lpf.value : 0);
                 }
             }
-        }
-        CheckBox {
-            id: showFeatures;
-            text: qsTr("Show detected features");
-            checked: true;
-            onCheckedChanged: controller.show_detected_features = checked;
-        }
-        CheckBox {
-            id: showOF;
-            text: qsTr("Show optical flow");
-            checked: true;
-            onCheckedChanged: controller.show_optical_flow = checked;
-        }
-        CheckBox {
-            id: showMotionDirection;
-            text: qsTr("Show motion direction");
-            checked: true;
-            onCheckedChanged: controller.show_motion_direction = checked;
         }
     }
 }
