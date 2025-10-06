@@ -20,7 +20,7 @@ mod find_offset { pub mod rs_sync; pub mod essential_matrix; pub mod visual_feat
 use super::gyro_source::TimeIMU;
 
 /// Represents the quality metrics for pose estimation
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PoseQuality {
     /// Ratio of inlier points to total points (0.0 to 1.0)
     pub inlier_ratio: f64,
@@ -83,7 +83,6 @@ pub struct SyncParams {
     pub pose_method: String,
     pub custom_sync_pattern: serde_json::Value,
     pub auto_sync_points: bool,
-    pub force_whole_video_analysis: bool
 }
 /// High-level selection of the pose method from UI, without tunable parameters
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -92,8 +91,25 @@ pub enum PoseMethodKind { EssentialLMEDS, EssentialRANSAC, Almeida, EightPoint, 
 impl Default for PoseMethodKind { fn default() -> Self { PoseMethodKind::EssentialLMEDS } }
 
 
-#[derive(Clone)]
+impl SyncParams {
+    /// Single source of truth for motion-estimation defaults. Starts from optional lens sync settings
+    /// and adapts for the lightweight estimate_motion_from_video mode.
+    pub fn for_motion_estimation(lens_sync_settings: Option<&serde_json::Value>) -> Self {
+        let mut p = lens_sync_settings
+            .and_then(|v| serde_json::from_value::<Self>(v.clone()).ok())
+            .unwrap_or_default();
+        // Ensure valid minimal settings without hard-coded magic numbers
+        p.max_sync_points = p.max_sync_points.max(1);
+        p.every_nth_frame = p.every_nth_frame.max(1);
+        // These are not needed for motion estimation
+        p.auto_sync_points = false;
+        p
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct FrameResult {
+    #[serde(skip)]
     pub of_method: OpticalFlowMethod,
     pub frame_no: usize,
     pub timestamp_us: i64,
@@ -105,6 +121,7 @@ pub struct FrameResult {
     pub transl_dir: Option<[f64; 3]>,
     pub pose_quality: Option<PoseQuality>,
 
+    #[serde(skip)]
     optical_flow: RefCell<BTreeMap<usize, OpticalFlowPairWithTs>>
 }
 unsafe impl Send for FrameResult {}
@@ -112,9 +129,11 @@ unsafe impl Sync for FrameResult {}
 
 #[derive(Default)]
 pub struct PoseEstimator {
-    pub sync_results: Arc<RwLock<BTreeMap<i64, FrameResult>>>,
+    // results 
+    pub sync_results: Arc<RwLock<BTreeMap<i64, FrameResult>>>,  // TODO: rename to analysis_results
     pub estimated_gyro: Arc<RwLock<BTreeMap<i64, TimeIMU>>>,
     pub estimated_quats: Arc<RwLock<TimeQuat>>,
+    // parameters
     pub lpf: AtomicU32,
     pub every_nth_frame: AtomicU32,
     pub pose_config: RwLock<String>,
@@ -122,6 +141,19 @@ pub struct PoseEstimator {
 }
 
 impl PoseEstimator {
+    /// Creates an isolated clone that copies current computed data but creates independent state.
+    pub fn clone_isolated(&self) -> Self {
+        Self {
+            sync_results: Arc::new(RwLock::new(self.sync_results.read().clone())),
+            estimated_gyro: Arc::new(RwLock::new(self.estimated_gyro.read().clone())),
+            estimated_quats: Arc::new(RwLock::new(self.estimated_quats.read().clone())),
+
+            lpf: self.lpf.load(SeqCst).into(),
+            every_nth_frame: self.every_nth_frame.load(SeqCst).into(),
+            pose_config: RwLock::new(self.pose_config.read().clone()),
+            offset_method: self.offset_method.load(SeqCst).into(),
+        }
+    }
     pub fn clear(&self) {
         self.sync_results.write().clear();
         self.estimated_gyro.write().clear();

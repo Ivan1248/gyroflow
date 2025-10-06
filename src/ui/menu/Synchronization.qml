@@ -22,7 +22,6 @@ MenuItem {
         property alias sync_lpf: lpf.value;
         property alias checkNegativeInitialOffset: checkNegativeInitialOffset.checked;
         property alias experimentalAutoSyncPoints: experimentalAutoSyncPoints.checked;
-        property alias forceWholeVideoAnalysis: forceWholeVideoAnalysis.checked;
         // property alias syncMethod: syncMethod.currentIndex;
         // property alias offsetMethod: offsetMethod.currentIndex;
         // property alias poseMethod: poseMethod.currentIndex;
@@ -54,7 +53,6 @@ MenuItem {
             if (o.hasOwnProperty("pose_method"))        window.motionData.poseMethod           = +o.pose_method;
             if (o.hasOwnProperty("custom_sync_pattern")) sync.customSyncTimestamps             = resolveSyncpointPattern(o.custom_sync_pattern);
             if (o.hasOwnProperty("auto_sync_points")) experimentalAutoSyncPoints.checked       = !!o.auto_sync_points;
-            if (o.hasOwnProperty("force_whole_video_analysis")) forceWholeVideoAnalysis.checked = !!o.force_whole_video_analysis;
             if (o.hasOwnProperty("do_autosync") && o.do_autosync) autosyncTimer.doRun = true;
         }
     }
@@ -71,19 +69,18 @@ MenuItem {
     }
     function getSettings(): var {
         return {
+            // optical flow and relative pose estimation methods from "Motion data" section
+            "of_method":          window.motionData.ofMethod,
+            "pose_method":        window.motionData.poseMethodString,
+            "every_nth_frame":    everyNthFrame.value,
             "initial_offset":     initialOffset.value,
             "initial_offset_inv": checkNegativeInitialOffset.checked,
             "search_size":        syncSearchSize.value,
             "calc_initial_fast":  calculateInitialOffsetFirst.checked,
             "max_sync_points":    maxSyncPoints.value,
-            "every_nth_frame":    everyNthFrame.value,
             "time_per_syncpoint": timePerSyncpoint.value,
-            // Get optical flow and pose method from Motion Data section
-            "of_method":          window.motionData.ofMethod,
             "offset_method":      offsetMethod.currentIndex,
-            "pose_method":        window.motionData.poseMethodString,
             "auto_sync_points":   experimentalAutoSyncPoints.checked,
-            "force_whole_video_analysis": forceWholeVideoAnalysis.checked,
         };
     }
     function getSettingsJson(): string { return JSON.stringify(getSettings()); }
@@ -206,11 +203,6 @@ MenuItem {
             scale: 0.7;
             tooltip: qsTr("Experimental automatic sync point selection.");
         }
-    }
-
-    CheckBox {
-        id: forceWholeVideoAnalysis;
-        text: qsTr("Force whole-video analysis");
     }
 
     InfoMessageSmall {

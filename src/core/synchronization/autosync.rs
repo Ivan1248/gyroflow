@@ -56,7 +56,7 @@ impl AutosyncProcess {
 
         drop(params);
 
-        if duration_ms < 10.0 || (mode != "compute_video_based_motion_estimates" && (frame_count < 2 || time_per_syncpoint < 10.0 || search_size < 10.0)) { return Err(()); }
+        if duration_ms < 10.0 || (mode != "estimate_motion_from_video" && (frame_count < 2 || time_per_syncpoint < 10.0 || search_size < 10.0)) { return Err(()); }
 
         let mut ranges_us: Vec<(i64, i64)> = timestamps_fract.iter().map(|x| {
             let range = (
@@ -66,10 +66,10 @@ impl AutosyncProcess {
             ((range.0 * 1000.0).round() as i64, (range.1 * 1000.0).round() as i64)
         }).collect();
 
-        if mode == "synchronize" && (!stab.gyro.read().has_motion() || sync_params.force_whole_video_analysis)
-        || mode == "compute_video_based_motion_estimates" {
-            // If no gyro data in file OR force_whole_video_analysis is enabled OR computing motion estimates, analyze the entire video
-            // set a single range covering the entire video (org_duration_ms is the duration of the video in milliseconds)
+        if mode == "synchronize" && !stab.gyro.read().has_motion()
+        || mode == "estimate_motion_from_video" {
+            // If no gyro data in file or computing motion estimates, analyze the entire video:
+            // set a single range covering the entire video (org_duration_ms is video duration)
             ranges_us.clear();
             ranges_us.push((0, (org_duration_ms * 1000.0).round() as i64));
         }
@@ -254,7 +254,7 @@ impl AutosyncProcess {
                 if !self.cancel_flag.load(SeqCst) {
                     cb(Either::Right(guessed));
                 }
-            } else if self.mode == "compute_video_based_motion_estimates" {
+            } else if self.mode == "estimate_motion_from_video" {
                 // Motion estimation only - skip offset finding, just signal completion
                 cb(Either::Left(vec![]));
             } else {  // self.mode == "synchronize"

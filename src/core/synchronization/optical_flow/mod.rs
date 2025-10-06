@@ -34,3 +34,7 @@ impl OpticalFlowMethod {
         }
     }
 }
+
+impl Default for OpticalFlowMethod {
+    fn default() -> Self { Self::OFAkaze(OFAkaze::default()) }
+}

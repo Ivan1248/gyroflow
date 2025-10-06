@@ -1263,6 +1263,10 @@ impl StabilizationManager {
         self.smoothing.write().set_motion_direction_param(name, val);
         self.invalidate_smoothing();
     }
+    pub fn load_motion_direction_params(&self, params_json: &serde_json::Value) {
+        self.smoothing.write().load_motion_direction_from_params(params_json);
+        self.invalidate_smoothing();
+    }
     pub fn get_motion_direction_status(&self) -> serde_json::Value {
         self.gyro.read().motion_direction_status.clone()
     }
@@ -1276,10 +1280,10 @@ impl StabilizationManager {
             smoothing:  Arc::new(RwLock::new(self.smoothing.read().clone())),
             input_file: Arc::new(RwLock::new(self.input_file.read().clone())),
             lens_profile_db: self.lens_profile_db.clone(),
+            pose_estimator: Arc::new(self.pose_estimator.clone_isolated()),  // not complete clone
 
             // NOT cloned:
             // stabilization
-            // pose_estimator
             // lens_calibrator
             // current_compute_id
             // smoothing_checksum
@@ -1357,7 +1361,7 @@ impl StabilizationManager {
         let gyro = self.gyro.read();
         let params = self.params.read();
 
-        let (smoothing_name, smoothing_params, horizon_amount, horizon_lock) = {
+        let (smoothing_name, smoothing_params, horizon_amount, horizon_lock, motion_direction_params) = {
             let smoothing_lock = self.smoothing.read();
             let smoothing = smoothing_lock.current();
 
@@ -1377,7 +1381,7 @@ impl StabilizationManager {
                 horizon_amount = 0.0;
             }
 
-            (smoothing.get_name(), parameters, horizon_amount, smoothing_lock.horizon_lock.clone())
+            (smoothing.get_name(), parameters, horizon_amount, smoothing_lock.horizon_lock.clone(), smoothing_lock.get_motion_direction_params_json())
         };
 
         let input_file = self.input_file.read().clone();
@@ -1430,6 +1434,7 @@ impl StabilizationManager {
                 "horizon_lock_pitch":     horizon_lock.horizonpitch,
                 "use_gravity_vectors":    gyro.use_gravity_vectors,
                 "horizon_lock_integration_method": gyro.horizon_lock_integration_method,
+                "motion_direction_params": motion_direction_params,
                 "video_speed":                   params.video_speed,
                 "video_speed_affects_smoothing": params.video_speed_affects_smoothing,
                 "video_speed_affects_zooming":   params.video_speed_affects_zooming,
@@ -1502,6 +1507,13 @@ impl StabilizationManager {
                 util::compress_to_base91_cbor(&gyro.quaternions)         .and_then(|s| obj.insert("integrated_quaternions".into(), serde_json::Value::String(s)));
                 util::compress_to_base91_cbor(&gyro.smoothed_quaternions).and_then(|s| obj.insert("smoothed_quaternions"  .into(), serde_json::Value::String(s)));
                 util::compress_to_base91_cbor(&params.fovs)              .and_then(|s| obj.insert("adaptive_zoom_fovs"    .into(), serde_json::Value::String(s)));
+                
+                // Save motion vectors (sync_results) for motion direction alignment
+                if let Some(sync_results) = self.pose_estimator.sync_results.try_read() {
+                    if !sync_results.is_empty() {
+                        util::compress_to_base91_cbor(&*sync_results).and_then(|s| obj.insert("motion_from_video".into(), serde_json::Value::String(s)));
+                    }
+                }
             }
         }
 
@@ -1713,12 +1725,18 @@ impl StabilizationManager {
                 if let Some(v) = obj.get("acc_rotation") { let v: [f64; 3] = serde_json::from_value(v.clone()).unwrap_or_default(); gyro.imu_transforms.set_acc_rotation(v[0], v[1], v[2]); }
                 if let Some(v) = obj.get("gyro_bias")    { gyro.imu_transforms.gyro_bias = serde_json::from_value(v.clone()).ok(); }
 
+                // Load motion vectors (sync_results) if present
+                if let Ok(motion_from_video) = util::decompress_from_base91_cbor::<BTreeMap<i64, crate::synchronization::FrameResult>>(obj.get("motion_from_video").and_then(|x| x.as_str()).unwrap_or_default()) {
+                    *self.pose_estimator.sync_results.write() = motion_from_video;
+                }
+
                 obj.remove("raw_imu");
                 obj.remove("quaternions");
                 obj.remove("smoothed_quaternions");
                 obj.remove("image_orientations");
                 obj.remove("gravity_vectors");
                 obj.remove("file_metadata");
+                obj.remove("motion_from_video");
             }
             if let Some(lens) = obj.get("calibration_data") {
                 let mut l = self.lens.write();

@@ -111,11 +111,11 @@ impl Default for AlmeidaEstimator {
 }
 
 impl AlmeidaEstimator {
-    pub fn estimate(&mut self, motion_vectors: &[MotionEntry], camera: &Camera, timestamp_ms: f64) -> na::UnitQuaternion<f32> {
+    pub fn estimate(&mut self, motion_directions: &[MotionEntry], camera: &Camera, timestamp_ms: f64) -> na::UnitQuaternion<f32> {
         if self.use_ransac {
-            solve_ypr_ransac(motion_vectors, camera, timestamp_ms, self.num_iters, self.inlier_angle, self.ransac_samples )
+            solve_ypr_ransac(motion_directions, camera, timestamp_ms, self.num_iters, self.inlier_angle, self.ransac_samples )
         } else {
-            solve_ypr_given(motion_vectors, camera, timestamp_ms)
+            solve_ypr_given(motion_directions, camera, timestamp_ms)
         }
     }
 }

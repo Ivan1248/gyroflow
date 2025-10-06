@@ -60,7 +60,7 @@ pub struct Controller {
 
     set_of_method: qt_method!(fn(&self, v: u32)),
     start_autosync: qt_method!(fn(&mut self, timestamps_fract: String, sync_params: String, mode: String)),
-    compute_video_based_motion_estimates: qt_method!(fn(&mut self, sync_params: String)),
+    estimate_motion_from_video: qt_method!(fn(&mut self, sync_params: String)),
     update_chart: qt_method!(fn(&self, chart: QJSValue, series: String) -> bool),
     update_frequency_graph: qt_method!(fn(&self, graph: QJSValue, idx: usize, ts: f64, sr: f64, fft_size: usize)),
     update_keyframes_view: qt_method!(fn(&self, kfview: QJSValue)),
@@ -82,6 +82,7 @@ pub struct Controller {
     // Motion direction controls
     set_motion_direction_alignment: qt_method!(fn(&self, enabled: bool)),
     set_motion_direction_param: qt_method!(fn(&self, name: QString, val: f64)),
+    load_motion_direction_params: qt_method!(fn(&self, params_json: QString)),
     get_motion_direction_status: qt_method!(fn(&self) -> QJsonArray),
     set_horizon_lock: qt_method!(fn(&self, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64)),
     set_use_gravity_vectors: qt_method!(fn(&self, v: bool)),
@@ -321,7 +322,7 @@ pub struct Controller {
     get_gps_anchor: qt_method!(fn(&self) -> QString),
     get_gps_overlap: qt_method!(fn(&self) -> f64),
     has_gps: qt_method!(fn(&self) -> bool),
-    has_motion_vectors: qt_method!(fn(&self) -> bool),
+    has_motion_directions: qt_method!(fn(&self) -> bool),
     get_gps_polyline: qt_method!(fn(&self, max_points: usize) -> QJsonArray),
     get_gps_current_xy: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
     gps_offset_changed: qt_signal!(),
@@ -405,9 +406,9 @@ impl Controller {
         QString::from(self.stabilizer.input_file.read().project_file_url.as_ref().cloned().unwrap_or_default())
     }
 
-    fn compute_video_based_motion_estimates(&mut self, sync_params: String) {
+    fn estimate_motion_from_video(&mut self, sync_params: String) {
         // Use empty timestamps_fract to trigger whole-video analysis
-        self.start_autosync("[]".into(), sync_params, "compute_video_based_motion_estimates".into());
+        self.start_autosync("[]".into(), sync_params, "estimate_motion_from_video".into());
     }
 
     // Overlaps with RenderQueue::do_autosync, TODO: refactor
@@ -428,8 +429,6 @@ impl Controller {
         sync_params.every_nth_frame     = sync_params.every_nth_frame.max(1);
 
         let for_rs = mode == "estimate_rolling_shutter";
-
-        let every_nth_frame = sync_params.every_nth_frame;
 
         self.sync_in_progress = true;
         self.sync_in_progress_changed();
@@ -471,6 +470,8 @@ impl Controller {
                 this.stabilizer.keyframes.write().update_gyro(&gyro);
                 this.stabilizer.invalidate_zooming();
             }
+            this.sync_in_progress = false;
+            this.sync_in_progress_changed();
             this.update_offset_model();
             this.request_recompute();
         });
@@ -508,72 +509,17 @@ impl Controller {
                 };
             });
 
-            let ranges = sync.get_ranges();
             let cancel_flag = self.cancel_flag.clone();
 
             let input_file = self.stabilizer.input_file.read().clone();
+            let video_size = self.stabilizer.params.read().size;
             let proc_height = self.processing_resolution;
             let gpu_decoding = self.stabilizer.gpu_decoding.load(SeqCst);
             core::run_threaded(move || {
-                let mut frame_no = 0;
-                let mut abs_frame_no = 0;
-
-                let mut decoder_options = ffmpeg_next::Dictionary::new();
-                if input_file.image_sequence_fps > 0.0 {
-                    let fps = rendering::fps_to_rational(input_file.image_sequence_fps);
-                    decoder_options.set("framerate", &format!("{}/{}", fps.numerator(), fps.denominator()));
+                if let Err(e) = crate::rendering::run_autosync_with_video_file(sync, &input_file, video_size, proc_height, gpu_decoding, cancel_flag, err.clone()) {
+                    err(("An error occured: %1".to_string(), e));
                 }
-                if input_file.image_sequence_start > 0 {
-                    decoder_options.set("start_number", &format!("{}", input_file.image_sequence_start));
-                }
-                if proc_height > 0 {
-                    decoder_options.set("scale", &format!("{}x{}", (proc_height * 16) / 9, proc_height));
-                }
-                ::log::debug!("Decoder options: {:?}", decoder_options);
-
-                let sync = std::rc::Rc::new(sync);
-
-                let fs_base = gyroflow_core::filesystem::get_engine_base();
-                match VideoProcessor::from_file(&fs_base, &input_file.url, gpu_decoding, 0, Some(decoder_options)) {
-                    Ok(mut proc) => {
-                        let err2 = err.clone();
-                        let sync2 = sync.clone();
-                        proc.on_frame(move |timestamp_us, input_frame, _output_frame, converter, _rate_control| {
-                            assert!(_output_frame.is_none());
-
-                            if abs_frame_no % every_nth_frame == 0 {
-                                let h = if proc_height > 0 { proc_height as u32 } else { input_frame.height() };
-                                let ratio = input_frame.height() as f64 / h as f64;
-                                let sw = (input_frame.width() as f64 / ratio).round() as u32;
-                                let sh = (input_frame.height() as f64 / (input_frame.width() as f64 / sw as f64)).round() as u32;
-                                match converter.scale(input_frame, ffmpeg_next::format::Pixel::GRAY8, sw, sh) {
-                                    Ok(small_frame) => {
-                                        let (width, height, stride, pixels) = (small_frame.plane_width(0), small_frame.plane_height(0), small_frame.stride(0), small_frame.data(0));
-
-                                        sync2.feed_frame(timestamp_us, frame_no, width, height, stride, pixels);
-                                    },
-                                    Err(e) => {
-                                        err2(("An error occured: %1".to_string(), e.to_string()))
-                                    }
-                                }
-                                frame_no += 1;
-                            }
-                            abs_frame_no += 1;
-                            Ok(())
-                        });
-                        if let Err(e) = proc.start_decoder_only(ranges, cancel_flag.clone()) {
-                            err(("An error occured: %1".to_string(), e.to_string()));
-                        }
-                        // Trigger an early recompute as soon as autosync has finished feeding frames,
-                        // for motion direction alignment if it is enabled
-                        request_recompute(());
-                        sync.finished_feeding_frames();
-                        request_recompute(());
-                    }
-                    Err(error) => {
-                        err(("An error occured: %1".to_string(), error.to_string()));
-                    }
-                };
+                request_recompute(());
             });
         } else {
             err(("An error occured: %1".to_string(), "Invalid parameters".to_string()));
@@ -1235,6 +1181,13 @@ impl Controller {
         self.chart_data_changed();
         self.request_recompute();
     }
+    fn load_motion_direction_params(&mut self, params_json: QString) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&params_json.to_string()) {
+            self.stabilizer.load_motion_direction_params(&json);
+            self.chart_data_changed();
+            self.request_recompute();
+        }
+    }
     fn get_motion_direction_status(&self) -> QJsonArray {
         util::serde_json_to_qt_array(&self.stabilizer.get_motion_direction_status())
     }
@@ -1672,7 +1625,7 @@ impl Controller {
     fn has_gps(&self) -> bool {
         self.stabilizer.get_gps_track().is_some()
     }
-    fn has_motion_vectors(&self) -> bool {
+    fn has_motion_directions(&self) -> bool {
         self.stabilizer.pose_estimator.sync_results.try_read()
             .map_or(false, |sr| sr.values().any(|fr| fr.transl_dir.is_some()))
     }

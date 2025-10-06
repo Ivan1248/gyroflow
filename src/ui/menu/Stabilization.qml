@@ -108,6 +108,10 @@ MenuItem {
             horizonPitchSlider.value = lockPitchCb.checked? +stab.horizon_lock_pitch : 0;
             Qt.callLater(updateHorizonLock);
 
+            if (stab.hasOwnProperty("`motion_direction_params`")) {  // TODO: check
+                controller.load_motion_direction_params(JSON.stringify(stab.motion_direction_params));
+            }
+
             if (stab.hasOwnProperty("video_speed")) videoSpeed.value = +stab.video_speed;
             if (stab.hasOwnProperty("video_speed_affects_smoothing"))     videoSpeedAffectsSmoothing.checked    = !!stab.video_speed_affects_smoothing;
             if (stab.hasOwnProperty("video_speed_affects_zooming"))       videoSpeedAffectsZooming.checked      = !!stab.video_speed_affects_zooming;
@@ -444,7 +448,7 @@ MenuItem {
         cb.onCheckedChanged: {
             controller.set_motion_direction_alignment(cb.checked);
             // Auto-run motion estimation if enabled but no data available
-            if (cb.checked && !controller.has_motion_vectors()) {
+            if (cb.checked && !controller.has_motion_directions()) {
                 window.motionData.runMotionEstimation();
             }
         }

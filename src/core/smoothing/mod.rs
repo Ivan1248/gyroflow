@@ -137,6 +137,20 @@ impl Smoothing {
         }
         if let Some(md) = &mut self.motion_direction { md.set_parameter(name, val); }
     }
+    pub fn load_motion_direction_from_params(&mut self, params_json: &serde_json::Value) {
+        if let serde_json::Value::Array(arr) = params_json {
+            if !arr.is_empty() {
+                self.motion_direction = Some(MotionDirectionAlignment::default());
+                for param in arr {
+                    if let Some(obj) = param.as_object() {
+                        if let (Some(name), Some(value)) = (obj.get("name").and_then(|v| v.as_str()), obj.get("value").and_then(|v| v.as_f64())) {
+                            self.set_motion_direction_param(name, value);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Smoothing {

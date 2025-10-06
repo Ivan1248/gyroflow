@@ -37,20 +37,9 @@ MenuItem {
         const settings = {
             "of_method": ofMethod.currentIndex,
             "pose_method": ["EssentialLMEDS", "EssentialRANSAC", "Almeida", "EightPoint", "Homography"][poseMethod.currentIndex] || "EssentialLMEDS",
-            "every_nth_frame": everyNthFrame.value,
-            // Dummy values for required but unused params:
-            "initial_offset": 0,
-            "initial_offset_inv": false,
-            "search_size": 1.0,
-            "calc_initial_fast": false,
-            "max_sync_points": 1,
-            "time_per_syncpoint": 0.1,
-            "offset_method": 0,
-            "custom_sync_pattern": null,
-            "auto_sync_points": false,
-            "force_whole_video_analysis": false // Will be handled by the mode itself
+            "every_nth_frame": everyNthFrame.value
         };
-        controller.compute_video_based_motion_estimates(JSON.stringify(settings));
+        controller.estimate_motion_from_video(JSON.stringify(settings));
     }
 
     FileDialog {
@@ -1147,11 +1136,11 @@ MenuItem {
 
         Label {
             position: Label.LeftPosition;
-            text: qsTr("Analyze every N-th frame");
+            text: qsTr("Analyze every n-th frame");
             NumberField {
                 id: everyNthFrame;
-                value: 3;
-                defaultValue: 3;
+                value: 1;
+                defaultValue: 1;
                 from: 1;
                 to: 100;
                 precision: 0;
