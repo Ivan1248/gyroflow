@@ -591,10 +591,10 @@ fn cross_correlate_angular_signals(
     }
     
     // Convert lag to time offset
-    // Positive lag means signal_b (gyro) needs to be shifted forward (is earlier)
-    // So we need to subtract that amount from signal_a (GPS) times to align
-    // Therefore return negative of lag
-    Some(-(best_lag as f64) / sample_rate_hz)
+    // Positive lag means signal_b (gyro) is delayed relative to signal_a (GPS)
+    // To align them, we need to shift GPS forward by the lag amount
+    // Therefore return positive lag directly
+    Some((best_lag as f64) / sample_rate_hz)
 }
 
 
@@ -651,12 +651,12 @@ mod tests {
         assert!(result.is_some());
         let result = result.unwrap();
 
-        println!("Found offset: {:.3}s, expected: {:.3}s", result.time_offset_s, -time_offset);
+        println!("Found offset: {:.3}s, expected: {:.3}s", result.time_offset_s, time_offset);
         println!("RMS error: {:.3}°", result.residual_rms_deg);
         println!("Valid samples: {}", result.valid_samples);
         
-        // Gyro is earlier by time_offset, so we need to subtract from GPS (negative offset)
-        let expected_offset = -time_offset;
+        // Gyro is earlier by time_offset, so we need to shift GPS forward (positive offset)
+        let expected_offset = time_offset;
         assert!((result.time_offset_s - expected_offset).abs() < 0.2);
         assert!(result.yaw_scale.is_none()); // Should not estimate scale
         assert!(result.residual_rms_deg < 5.0); // Low error expected
@@ -757,7 +757,7 @@ mod tests {
         assert!(result_rates.is_some());
         let result_rates = result_rates.unwrap();
 
-        let expected_offset = -time_offset;  // Gyro is earlier, so GPS offset is negative
+        let expected_offset = time_offset;  // Gyro is earlier, so GPS offset is positive
         println!("Rates - Found offset: {:.3}s, expected: {:.3}s", result_rates.time_offset_s, expected_offset);
         println!("Rates - RMS error: {:.3}°", result_rates.residual_rms_deg);
         
