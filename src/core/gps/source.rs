@@ -156,7 +156,7 @@ impl Default for GpsSource {
             use_processed_motion: false,
             speed_threshold: 1.0,  // Default speed threshold
             sample_rate_hz: 10.0,  // Default sample rate
-            max_time_offset_s: 20.0,  // Default max time shift
+            max_time_offset_s: 15.0,  // Default max time shift
         }
     }
 }

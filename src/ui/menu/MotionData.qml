@@ -762,7 +762,7 @@ MenuItem {
         }
         Label {
             position: Label.LeftPosition;
-            text: qsTr("GPS Speed Threshold");
+            text: qsTr("GPS speed threshold");
             visible: gpsSyncMode.currentIndex === 1;
 
             NumberField {
@@ -776,6 +776,30 @@ MenuItem {
                 width: parent.width;
                 tooltip: qsTr("Speed threshold for GPS masking. Regions with speed below this threshold will be shaded on the GPS chart, indicating unreliable GPS data.");
                 onValueChanged: controller.gps_speed_threshold = value;
+            }
+        }
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Max. time offset");
+            visible: gpsSyncMode.currentIndex === 1;
+
+            NumberField {
+                id: gpsMaxTimeOffset;
+                visible: gpsSyncMode.currentIndex === 1;
+                unit: qsTr("s");
+                precision: 1;
+                from: 0.0;
+                to: 120.0;
+                value: controller.gps_max_time_offset;
+                width: parent.width;
+                tooltip: qsTr("Maximum time shift window for GPS/gyro synchronization search.");
+                onValueChanged: controller.gps_max_time_offset = value;
+                Connections {
+                    target: controller;
+                    function onGps_changed() {
+                        gpsMaxTimeOffset.value = controller.gps_max_time_offset;
+                    }
+                }
             }
         }
         Label {
