@@ -110,6 +110,12 @@ MenuItem {
 
             if (stab.hasOwnProperty("`motion_direction_params`")) {  // TODO: check
                 controller.load_motion_direction_params(JSON.stringify(stab.motion_direction_params));
+                // Update UI with loaded parameters
+                for (const param of stab.motion_direction_params) {
+                    if (param.name === "min_inlier_ratio") mdMinInlier.value = param.value;
+                    else if (param.name === "max_epi_err") mdMaxErr.value = param.value;
+                    else if (param.name === "flip_backward_dir") mdFlipBackward.checked = param.value > 0.5;
+                }
             }
 
             if (stab.hasOwnProperty("video_speed")) videoSpeed.value = +stab.video_speed;
@@ -476,6 +482,12 @@ MenuItem {
                     width: parent.width;
                     onValueChanged: controller.set_motion_direction_param("max_epi_err", value);
                 }
+            }
+            CheckBox {
+                id: mdFlipBackward;
+                text: qsTr("Flip backward direction");
+                checked: false;
+                onCheckedChanged: controller.set_motion_direction_param("flip_backward_dir", checked ? 1.0 : 0.0);
             }
         }
 

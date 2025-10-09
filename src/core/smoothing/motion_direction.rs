@@ -17,7 +17,7 @@ impl Default for MotionDirectionAlignment {
             min_inlier_ratio: 0.2,
             max_epi_err: 2.0,
             // TODO: flip_backward_dir=true is more stable when stationary, but looks in the reverse motion direction if going backward
-            flip_backward_dir: true,
+            flip_backward_dir: false,
             status: Mutex::new(vec![serde_json::json!({
                 "type": "Label",
                 "text": "Cannot apply motion direction alignment: vision-based motion direction data has not been computed."
@@ -43,6 +43,7 @@ impl MotionDirectionAlignment {
         match name {
             "min_inlier_ratio" => self.min_inlier_ratio = val,
             "max_epi_err" => self.max_epi_err = val,
+            "flip_backward_dir" => self.flip_backward_dir = val > 0.1,
             _ => log::error!("Invalid parameter name: {}", name)
         }
     }
@@ -50,6 +51,7 @@ impl MotionDirectionAlignment {
         match name {
             "min_inlier_ratio" => self.min_inlier_ratio,
             "max_epi_err" => self.max_epi_err,
+            "flip_backward_dir" => if self.flip_backward_dir { 1.0 } else { 0.0 },
             _ => 0.0
         }
     }
@@ -76,6 +78,13 @@ impl MotionDirectionAlignment {
             "default": 2.0,
             "precision": 3,
             "unit": ""
+        },{
+            "name": "flip_backward_dir",
+            "description": "Flip backward direction",
+            "type": "CheckBox",
+            "default": self.flip_backward_dir,
+            "value": if self.flip_backward_dir { 1.0 } else { 0.0 },
+            "advanced": true
         }])
     }
     pub fn get_status_json(&self) -> serde_json::Value { serde_json::Value::Array(self.status.lock().unwrap().clone()) }
@@ -83,6 +92,7 @@ impl MotionDirectionAlignment {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         hasher.write_u64(self.min_inlier_ratio.to_bits());
         hasher.write_u64(self.max_epi_err.to_bits());
+        hasher.write_u64(self.flip_backward_dir as u64);
         hasher.finish()
     }
 
