@@ -61,3 +61,9 @@ impl OpticalFlowTrait for OFAkaze {
     fn size(&self) -> (u32, u32) { self.img_size }
     fn cleanup(&mut self) { }
 }
+
+impl Default for OFAkaze {
+    fn default() -> Self {
+        Self { features: Vec::new(), descriptors: Vec::new(), img_size: (0, 0) }
+    }
+}

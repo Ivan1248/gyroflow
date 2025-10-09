@@ -18,10 +18,29 @@ MenuItem {
     property alias hasRawGyro: integrator.hasRawGyro;
     property alias integrationMethod: integrator.currentIndex;
     property alias orientationIndicator: orientationIndicator;
+    property alias gpsMap: gpsMap;
     property bool allMetadata: allMetadataCb.visible && allMetadataCb.checked;
     property string filename: "";
     property string detectedFormat: "";
     property url lastSelectedFile: "";
+
+    // Expose video motion settings for synchronization to access
+    property alias ofMethod: ofMethod.currentIndex;
+    property alias poseMethod: poseMethod.currentIndex;
+    property string poseMethodString: ["EssentialLMEDS", "EssentialRANSAC", "Almeida", "EightPoint", "Homography"][poseMethod.currentIndex] || "EssentialLMEDS";
+
+    // Function to trigger motion estimation (can be called from other QML files)
+    function runMotionEstimation(): void {
+        if (!window.videoArea.vid.loaded || controller.sync_in_progress) {
+            return;
+        }
+        const settings = {
+            "of_method": ofMethod.currentIndex,
+            "pose_method": ["EssentialLMEDS", "EssentialRANSAC", "Almeida", "EightPoint", "Homography"][poseMethod.currentIndex] || "EssentialLMEDS",
+            "every_nth_frame": everyNthFrame.value
+        };
+        controller.estimate_motion_from_video(JSON.stringify(settings));
+    }
 
     FileDialog {
         id: fileDialog;
@@ -160,6 +179,19 @@ MenuItem {
         anchors.horizontalCenter: parent.horizontalCenter;
         onClicked: fileDialog.open2();
     }
+    Button {
+        text: qsTr("Load GPX");
+        iconName: "file-empty"
+        anchors.horizontalCenter: parent.horizontalCenter;
+        onClicked: gpxDialog.open2();
+    }
+    FileDialog {
+        id: gpxDialog;
+        title: qsTr("Choose a GPX file");
+        nameFilters: [qsTr("GPS Exchange Format") + " (*.gpx)"];
+        type: "video";
+        onAccepted: controller.load_gpx(selectedFile);
+    }
     InfoMessageSmall {
         show: Qt.platform.os == "android" && !root.detectedFormat && root.lastSelectedFile.toString();
         type: InfoMessage.Info;
@@ -186,8 +218,33 @@ MenuItem {
 
         model: ({
             "File name": "---",
-            "Detected format": "---"
+            "Detected format": "---",
+            "GPX status": "---"
         })
+    }
+    Timer {
+        id: gpxStatusTimer;
+        interval: 500;
+        running: true;
+        repeat: true;
+        onTriggered: {
+            const s = controller.get_gpx_summary();
+            if (s && s.loaded) {
+                let msg = s.points + " pts";
+                if (s.start_time !== undefined && s.epoch_end_s !== undefined) {
+                    msg += ", " + new Date(s.start_time*1000).toISOString() + " → " + new Date(s.epoch_end_s*1000).toISOString();
+                }
+                if (s.overlap_ms !== undefined) {
+                    const ms = Math.round(s.overlap_ms);
+                    const mm = Math.floor(ms/60000); 
+                    const ss = Math.floor((ms%60000)/1000);
+                    msg += ", overlap " + mm + ":" + ("0"+ss).slice(-2);
+                }
+                info.updateEntry("GPX status", msg);
+            } else {
+                info.updateEntry("GPX status", "---");
+            }
+        }
     }
     Label {
         position: Label.LeftPosition;
@@ -672,6 +729,185 @@ MenuItem {
         }
     }
 
+    // GPS section (gated by has_gps())
+    Column {
+        id: gpsSection;
+        width: parent.width;
+        spacing: 6 * dpiScale;
+        visible: controller.has_gps;
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("GPS sync mode")
+
+            ComboBox {
+                id: gpsSyncMode;
+                model: [qsTr("Off"), qsTr("Auto"), qsTr("Manual")];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: controller.gps_sync_mode;
+                onCurrentIndexChanged: {
+                    controller.gps_sync_mode = currentIndex;
+                    currentIndex = controller.gps_sync_mode;
+                }
+            }
+        }
+        CheckBox {
+            id: gpsUseProcessedMotion;
+            text: qsTr("Use processed motion for sync");
+            visible: gpsSyncMode.currentIndex === 1;
+            checked: controller.gps_use_processed_motion;
+            tooltip: qsTr("Use motion data stabilization and smoothing aplied for GPS synchronization. Motion direction alignment can improve accuracy for head-mounted camera recordings.");
+            onCheckedChanged: controller.gps_use_processed_motion = checked;
+        }
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("GPS Speed Threshold");
+            visible: gpsSyncMode.currentIndex === 1;
+
+            NumberField {
+                id: gpsSpeedThreshold;
+                visible: gpsSyncMode.currentIndex === 1;
+                unit: "m/s";
+                precision: 1;
+                from: 0.1;
+                to: 10.0;
+                value: controller.gps_speed_threshold;
+                width: parent.width;
+                tooltip: qsTr("Speed threshold for GPS masking. Regions with speed below this threshold will be shaded on the GPS chart, indicating unreliable GPS data.");
+                onValueChanged: controller.gps_speed_threshold = value;
+            }
+        }
+        Label {
+            visible: gpsSyncMode.currentIndex === 2;
+            position: Label.LeftPosition;
+            text: qsTr("GPS offset")
+
+            NumberField {
+                id: gpsOffset;
+                width: Math.max(120 * dpiScale, root.width - 350 * dpiScale);
+                height: 25 * dpiScale;
+                precision: 2;
+                unit: qsTr("s");
+                value: controller.gps_offset_ms / 1000.0;
+                enabled: gpsSyncMode.currentIndex === 2;
+                onEditingFinished: if (gpsSyncMode.currentIndex === 2) controller.gps_offset_ms = value * 1000.0;
+
+                Connections {
+                    target: controller;
+                    function onGps_changed() {
+                        gpsOffset.value = controller.gps_offset_ms / 1000.0;
+                    }
+                }
+            }
+        }
+        InfoMessageSmall {
+            show: true;
+            type: InfoMessage.Info;
+            text: {
+                const modes = [qsTr("Off"), qsTr("Auto"), qsTr("Manual")];
+                const mode = modes[gpsSyncMode.currentIndex] || qsTr("Off");
+                const anchor = controller.get_gps_anchor();
+                const overlap = controller.get_gps_overlap();
+                const off = controller.gps_offset_ms / 1000.0;
+                
+                let t = qsTr("GPS offset: %1 s").arg(off.toFixed(2));
+                t += qsTr(", anchor: %1").arg(anchor);
+                t += qsTr(", overlap: %1%").arg(overlap.toFixed(3));
+                
+                if (overlap <= 0.0) {
+                    t += " — " + qsTr("No overlap; relative timeline");
+                }
+                t;
+            }
+        }
+        CheckBoxWithContent {
+            id: gpsMapCheckbox;
+            text: qsTr("GPS map");
+            onCheckedChanged: { 
+                if (gpsMapCheckbox.checked) {
+                    gpsMap.refreshPolyline();
+                }
+                Qt.callLater(gpsMap.requestPaint); 
+            }
+        }
+        Canvas {
+            id: gpsMap
+            width: parent.width
+            height: parent.width * 0.75
+            visible: gpsMapCheckbox.checked
+            property var poly: []
+            property var cur: []
+
+            function refreshPolyline(): void {
+                poly = controller.get_gps_polyline(300);
+                requestPaint();
+            }
+            function updatePosition(timestamp: real): void {
+                cur = controller.get_gps_current_xy(Math.round(timestamp));
+                requestPaint();
+            }
+
+            Connections {
+                target: controller;
+                function onGps_changed(): void {
+                    if (gpsMapCheckbox.checked) {
+                        gpsMap.refreshPolyline();
+                    }
+                }
+            }
+
+            onPaint: {
+                if (!gpsMapCheckbox.checked) return;
+                let ctx = getContext("2d");
+                ctx.reset();
+
+                // Uses as much canvas as possible while preserving uniform scaling
+                let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+                for (let i = 0; i < poly.length; i++) {
+                    const px = poly[i][0]; const py = poly[i][1];
+                    if (px < minx) minx = px; if (px > maxx) maxx = px;
+                    if (py < miny) miny = py; if (py > maxy) maxy = py;
+                }
+                const pad = 6; // px margin
+                const dx = Math.max(1e-6, maxx - minx); 
+                const dy = Math.max(1e-6, maxy - miny);
+                const sx = (width  - 2 * pad) / dx; 
+                const sy = (height - 2 * pad) / dy;
+                const s  = Math.min(sx, sy);
+                const vx = (width  - s * dx) / 2 - s * minx; 
+                const vy = (height - s * dy) / 2 - s * miny;
+
+                if (poly && poly.length >= 2) {
+                    ctx.strokeStyle = style === "light" ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.5)";
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    for (let i = 0; i < poly.length; i++) {
+                        const x = s * poly[i][0] + vx;
+                        const y = s * poly[i][1] + vy;
+                        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                }
+
+                if (cur && cur.length >= 2) {
+                    const x = s * cur[0] + vx;
+                    const y = s * cur[1] + vy;
+                    ctx.fillStyle = styleAccentColor;
+                    ctx.beginPath(); ctx.arc(x, y, 3, 0, 2*Math.PI); ctx.fill();
+                }
+            }
+            Component.onCompleted: refreshPolyline()
+        }
+        Connections {
+            target: controller
+            function onChart_data_changed(): void {
+                gpsSection.visible = controller.has_gps;
+                if (gpsSection.visible && gpsMapCheckbox.checked) gpsMap.refreshPolyline();
+            }
+        }
+    }
+
     Row {
         anchors.horizontalCenter: parent.horizontalCenter;
         LinkButton {
@@ -702,6 +938,8 @@ MenuItem {
                                 controller.export_full_metadata(selectedFile, root.lastSelectedFile.toString()? root.lastSelectedFile : window.videoArea.loadedFileUrl);
                             } else if (exportData == "parsed") {
                                 controller.export_parsed_metadata(selectedFile);
+                            } else if (exportData === "gpx") {
+                                controller.export_synchronized_gpx(selectedFile);
                             } else {
                                 controller.export_gyro_data(selectedFile, exportData);
                             }
@@ -774,6 +1012,17 @@ MenuItem {
                         }
                     }
                     Action {
+                        text: qsTr("Export synchronized GPX");
+                        onTriggered: {
+                            const folder = filesystem.get_folder(root.lastSelectedFile.toString()? root.lastSelectedFile : window.videoArea.loadedFileUrl);
+                            const filename = root.filename.replace(/\.[^/.]+$/, ".gpx");
+                            exportFileDialog.selectedFile = filesystem.get_file_url(folder, filename, false);
+                            exportFileDialog.nameFilters = ["GPX (*.gpx)"];
+                            exportFileDialog.exportData = "gpx";
+                            exportFileDialog.open2();
+                        }
+                    }
+                    Action {
                         text: qsTr("Export full metadata");
                         onTriggered: {
                             if (Qt.platform.os == "ios") {
@@ -832,5 +1081,138 @@ MenuItem {
         anchors.bottomMargin: -35 * dpiScale;
         extensions: fileDialog.extensions;
         onLoadFile: (url) => root.loadFile(url)
+    }
+
+    Item {
+        id: videoMotionSett;
+        property alias processingResolution: processingResolution.currentIndex;
+        property alias ofMethod: ofMethod.currentIndex;
+        property alias poseMethod: poseMethod.currentIndex;
+        property alias everyNthFrame: everyNthFrame.value;
+        property alias showFeatures: showFeatures.checked;
+        property alias showOF: showOF.checked;
+        property alias showMotionDirection: showMotionDirection.checked;
+
+        Component.onCompleted: settings.init(videoMotionSett);
+        function propChanged() { settings.propChanged(videoMotionSett); }
+    }
+
+    Button {
+        text: qsTr("Estimate motion from video");
+        accent: false;
+        iconName: "video";
+        enabled: window.videoArea.vid.loaded && !controller.sync_in_progress;
+        onClicked: root.runMotionEstimation();
+    }
+
+    InfoMessageSmall {
+        text: qsTr("This will analyze the entire video to estimate camera motion from the image itself. The data can be used for motion direction alignment in the Stabilization section.");
+    }
+
+    AdvancedSection {
+        id: videoMotionAdvanced;
+        btn.text: qsTr("Advanced video motion settings");
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Processing resolution");
+            ComboBox {
+                id: processingResolution;
+                model: [QT_TRANSLATE_NOOP("Popup", "Full"), "1080p", "720p", "480p"];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: 3; // 480p default for better performance
+                onCurrentIndexChanged: {
+                    videoMotionSett.propChanged();
+                    let target_height = -1;
+                    switch (currentIndex) {
+                        case 1: target_height = 1080; break;
+                        case 2: target_height = 720; break;
+                        case 3: target_height = 480; break;
+                    }
+                    controller.set_processing_resolution(target_height);
+                }
+            }
+        }
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Optical flow method");
+            ComboBox {
+                id: ofMethod;
+                model: ["AKAZE", "PyrLK", "DIS"];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: 2; // DIS default
+                onCurrentIndexChanged: {
+                    videoMotionSett.propChanged();
+                    controller.set_of_method(currentIndex);
+                }
+            }
+        }
+
+        InfoMessageSmall {
+            show: ofMethod.currentValue == "AKAZE";
+            text: qsTr("The AKAZE method may be more accurate but is significantly slower than OpenCV methods. Use only if OpenCV doesn't produce good results");
+        }
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Pose method");
+            ComboBox {
+                id: poseMethod;
+                model: ["Essential (LMEDS)", "Essential (RANSAC)", "Almeida", "EightPoint", "findHomography"];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: 0; // Essential LMEDS default
+                onCurrentIndexChanged: videoMotionSett.propChanged();
+            }
+        }
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Analyze every n-th frame");
+            NumberField {
+                id: everyNthFrame;
+                value: 1;
+                defaultValue: 1;
+                from: 1;
+                to: 100;
+                precision: 0;
+                width: parent.width;
+                tooltip: qsTr("Higher values are faster but less accurate. 3-5 is a good balance for motion direction estimation.");
+                onValueChanged: videoMotionSett.propChanged();
+            }
+        }
+
+        CheckBox {
+            id: showFeatures;
+            text: qsTr("Show detected features");
+            checked: false;
+            onCheckedChanged: {
+                videoMotionSett.propChanged();
+                controller.show_detected_features = checked;
+            }
+        }
+
+        CheckBox {
+            id: showOF;
+            text: qsTr("Show optical flow");
+            checked: false;
+            onCheckedChanged: {
+                videoMotionSett.propChanged();
+                controller.show_optical_flow = checked;
+            }
+        }
+
+        CheckBox {
+            id: showMotionDirection;
+            text: qsTr("Show motion direction");
+            checked: true;
+            onCheckedChanged: {
+                videoMotionSett.propChanged();
+                controller.show_motion_direction = checked;
+            }
+        }
     }
 }

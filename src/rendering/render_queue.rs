@@ -941,7 +941,21 @@ impl RenderQueue {
             }
 
             core::run_threaded(move || {
-                Self::do_autosync(stab.clone(), processing, &input_file, err2, proc_height);
+                Self::do_autosync(stab.clone(), processing.clone(), &input_file, err2, proc_height);
+
+                // Check if motion direction alignment is enabled but motion vectors are missing
+                // This should not happen during rendering if motion estimation was done properly
+                if export_metadata.is_none() && export_stmap.is_none() {
+                    let motion_direction_enabled = stab.smoothing.read()
+                        .get_motion_direction_status_json()
+                        .as_array()
+                        .map_or(false, |arr| !arr.is_empty());
+                    if motion_direction_enabled && stab.pose_estimator.sync_results.read().is_empty() {
+                        ::log::warn!("Motion direction alignment is enabled but no motion vectors found in memory. Running motion estimation for this job.");
+                        // Use UI knobs: of_method, pose_method, every_nth_frame, processing_resolution via SyncParams::for_motion_estimation
+                        Self::do_motion_estimation(stab.clone(), processing.clone(), &input_file, err.clone(), proc_height);
+                    }
+                }
                 stab.recompute_blocking();
 
                 if let Some((opt, path, fields)) = export_metadata {
@@ -1186,7 +1200,7 @@ impl RenderQueue {
                     let smoothing = stabilizer.smoothing.read().clone();
                     let params = stabilizer.params.read();
 
-                    let stab = StabilizationManager {
+                    let mut stab = StabilizationManager {
                         params: Arc::new(RwLock::new(core::stabilization_params::StabilizationParams {
                             fov:                    params.fov,
                             background:             params.background,
@@ -1209,6 +1223,8 @@ impl RenderQueue {
                         })),
                         input_file: Arc::new(RwLock::new(gyroflow_core::InputFile { url: if is_gf_data { String::new() } else { url.clone() }, project_file_url: None, image_sequence_start: 0, image_sequence_fps: 0.0, preset_name: None, preset_output_size: None })),
                         lens_profile_db: stabilizer.lens_profile_db.clone(),
+                        // Use a job-isolated estimator cloned from UI state
+                        pose_estimator: Arc::new(stabilizer.pose_estimator.clone_isolated()),
                         ..Default::default()
                     };
 
@@ -1409,6 +1425,7 @@ impl RenderQueue {
         job_id
     }
 
+    // Overlaps with Controller::start_autosync, TODO: refactor
     fn do_autosync<F: Fn(f64) + Send + Sync + Clone + 'static, F2: Fn((String, String)) + Send + Sync + Clone + 'static>(stab: Arc<StabilizationManager>, processing_cb: F, input_file: &gyroflow_core::InputFile, err: F2, proc_height: i32) {
         let (url, duration_ms) = {
             (stab.input_file.read().url.clone(), stab.params.read().duration_ms)
@@ -1428,7 +1445,6 @@ impl RenderQueue {
             processing_cb(0.01);
             use gyroflow_core::synchronization::AutosyncProcess;
             use gyroflow_core::synchronization;
-            use crate::rendering::VideoProcessor;
             use itertools::Either;
 
             if let Ok(mut sync_params) = serde_json::from_value(sync_settings) as serde_json::Result<synchronization::SyncParams> {
@@ -1455,8 +1471,6 @@ impl RenderQueue {
                     sync_params.initial_offset     *= 1000.0; // s to ms
                     sync_params.time_per_syncpoint *= 1000.0; // s to ms
                     sync_params.search_size        *= 1000.0; // s to ms
-
-                    let every_nth_frame = sync_params.every_nth_frame.max(1);
 
                     let size = stab.params.read().size;
 
@@ -1492,67 +1506,9 @@ impl RenderQueue {
                             }
                         });
 
-                        let (sw, sh) = ((proc_height as f64 * (size.0 as f64 / size.1 as f64)).round() as u32, proc_height as u32);
-
+                        let video_size = size;
                         let gpu_decoding = stab.gpu_decoding.load(SeqCst);
-
-                        let mut frame_no = 0;
-                        let mut abs_frame_no = 0;
-                        let sync = Arc::new(sync);
-
-                        let mut decoder_options = ffmpeg_next::Dictionary::new();
-                        if proc_height > 0 {
-                            decoder_options.set("scale", &format!("{}x{}", (proc_height * 16) / 9, proc_height));
-                        }
-
-                        if input_file.image_sequence_fps > 0.0 {
-                            let fps = if input_file.image_sequence_fps.fract() > 0.1 {
-                                ffmpeg_next::Rational::new((fps * 1001.0).round() as i32, 1001)
-                            } else {
-                                ffmpeg_next::Rational::new(fps.round() as i32, 1)
-                            };
-                            decoder_options.set("framerate", &format!("{}/{}", fps.numerator(), fps.denominator()));
-                        }
-                        if input_file.image_sequence_start > 0 {
-                            decoder_options.set("start_number", &format!("{}", input_file.image_sequence_start));
-                        }
-                        if cfg!(target_os = "android") {
-                            decoder_options.set("ndk_codec", "1");
-                        }
-                        ::log::debug!("Decoder options: {:?}", decoder_options);
-
-                        let fs_base = filesystem::get_engine_base();
-                        match VideoProcessor::from_file(&fs_base, &url, gpu_decoding, 0, Some(decoder_options)) {
-                            Ok(mut proc) => {
-                                let err2 = err.clone();
-                                let sync2 = sync.clone();
-                                proc.on_frame(move |timestamp_us, input_frame, _output_frame, converter, _rate_control| {
-                                    if abs_frame_no % every_nth_frame == 0 {
-                                        match converter.scale(input_frame, ffmpeg_next::format::Pixel::GRAY8, sw, sh) {
-                                            Ok(small_frame) => {
-                                                let (width, height, stride, pixels) = (small_frame.plane_width(0), small_frame.plane_height(0), small_frame.stride(0), small_frame.data(0));
-
-                                                sync2.feed_frame(timestamp_us, frame_no, width, height, stride, pixels);
-                                            },
-                                            Err(e) => {
-                                                err2(("An error occured: %1".to_string(), e.to_string()))
-                                            }
-                                        }
-                                        frame_no += 1;
-                                    }
-                                    abs_frame_no += 1;
-                                    Ok(())
-                                });
-                                if let Err(e) = proc.start_decoder_only(sync.get_ranges(), cancel_flag) {
-                                    err(("An error occured: %1".to_string(), e.to_string()));
-                                }
-
-                                sync.finished_feeding_frames();
-                            }
-                            Err(error) => {
-                                err(("An error occured: %1".to_string(), error.to_string()));
-                            }
-                        };
+                        let _ = crate::rendering::run_autosync_with_video_file(sync, input_file, video_size, proc_height, gpu_decoding, cancel_flag, err.clone());
                     } else {
                         err(("An error occured: %1".to_string(), "Invalid parameters".to_string()));
                     }
@@ -1563,6 +1519,26 @@ impl RenderQueue {
             processing_cb(1.0);
             // --------------------------------- Autosync ---------------------------------
             // ----------------------------------------------------------------------------
+        }
+    }
+
+    // Lightweight whole-video motion estimation pass
+    fn do_motion_estimation<F: Fn(f64) + Send + Sync + Clone + 'static, F2: Fn((String, String)) + Send + Sync + Clone + 'static>(stab: Arc<StabilizationManager>, processing_cb: F, input_file: &gyroflow_core::InputFile, err: F2, proc_height: i32) {
+        use gyroflow_core::synchronization::AutosyncProcess;
+        use gyroflow_core::synchronization;
+
+        let sync_settings = stab.lens.read().sync_settings.clone().unwrap_or_default();
+        if let Ok(_existing) = serde_json::from_value::<synchronization::SyncParams>(sync_settings.clone()) {
+            let sync_params = synchronization::SyncParams::for_motion_estimation(stab.lens.read().sync_settings.as_ref());
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            if let Ok(mut sync) = AutosyncProcess::from_manager(&stab, &[], sync_params, "estimate_motion_from_video".into(), cancel_flag.clone()) {
+                let processing_cb2 = processing_cb.clone();
+                sync.on_progress(move |percent, _ready, _total| { processing_cb2(percent); });
+
+                let video_size = stab.params.read().size;
+                let gpu_decoding = stab.gpu_decoding.load(SeqCst);
+                let _ = crate::rendering::run_autosync_with_video_file(sync, input_file, video_size, proc_height, gpu_decoding, cancel_flag, err.clone());
+            }
         }
     }
 

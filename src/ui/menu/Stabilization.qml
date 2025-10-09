@@ -108,6 +108,10 @@ MenuItem {
             horizonPitchSlider.value = lockPitchCb.checked? +stab.horizon_lock_pitch : 0;
             Qt.callLater(updateHorizonLock);
 
+            if (stab.hasOwnProperty("`motion_direction_params`")) {  // TODO: check
+                controller.load_motion_direction_params(JSON.stringify(stab.motion_direction_params));
+            }
+
             if (stab.hasOwnProperty("video_speed")) videoSpeed.value = +stab.video_speed;
             if (stab.hasOwnProperty("video_speed_affects_smoothing"))     videoSpeedAffectsSmoothing.checked    = !!stab.video_speed_affects_smoothing;
             if (stab.hasOwnProperty("video_speed_affects_zooming"))       videoSpeedAffectsZooming.checked      = !!stab.video_speed_affects_zooming;
@@ -438,6 +442,82 @@ MenuItem {
         }
     }
 
+    CheckBoxWithContent {
+        id: motionDirCb;
+        text: qsTr("Motion direction alignment");
+        cb.onCheckedChanged: {
+            controller.set_motion_direction_alignment(cb.checked);
+            // Auto-run motion estimation if enabled but no data available
+            if (cb.checked && !controller.has_motion_directions()) {
+                window.motionData.runMotionEstimation();
+            }
+        }
+
+        // Parameters
+        Column {
+            width: parent.width;
+            spacing: 2 * dpiScale;
+            visible: motionDirCb.cb.checked;
+
+            Label {
+                text: qsTr("Min inlier ratio");
+                SliderWithField {
+                    id: mdMinInlier;
+                    from: 0.0; to: 1.0; value: 0.2; precision: 3;
+                    width: parent.width;
+                    onValueChanged: controller.set_motion_direction_param("min_inlier_ratio", value);
+                }
+            }
+            Label {
+                text: qsTr("Max epipolar error");
+                SliderWithField {
+                    id: mdMaxErr;
+                    from: 0.0; to: 5.0; value: 2.0; precision: 3;
+                    width: parent.width;
+                    onValueChanged: controller.set_motion_direction_param("max_epi_err", value);
+                }
+            }
+        }
+
+        // Status messages
+        Column {
+            id: mdStatus
+            width: parent.width;
+            spacing: 2 * dpiScale;
+            visible: motionDirCb.cb.checked;
+            function refresh() {
+                const status = controller.get_motion_direction_status();
+                for (let i = children.length; i > 0; --i) children[i - 1].destroy();
+
+                if (status.length > 0) {
+                    let qml = "import QtQuick; import '../components/'; Column { width: parent.width; ";
+                    for (const x of status) {
+                        switch (x.type) {
+                            case 'Label': {
+                                let text = qsTranslate("Stabilization", x.text).replace(/\n/g, "<br>");
+                                if (x.text_args) {
+                                    for (const arg of x.text_args) text = text.arg(arg);
+                                }
+                                qml += `BasicText { width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.StyledText; text: "${text}" }`;
+                                break;
+                            }
+                            case 'QML':
+                                qml += x.custom_qml;
+                                break;
+                        }
+                    }
+                    qml += "}";
+                    Qt.createQmlObject(qml, mdStatus);
+                }
+            }
+            Connections {
+                target: controller;
+                // TODO: improve triggers and conditions
+                function onCompute_progress(id, progress) { if (progress >= 0.0) { mdStatus.refresh(); } }
+            }
+        }
+    }
+
     InfoMessageSmall {
         id: maxValues;
         property real maxPitch: 0;
@@ -538,16 +618,12 @@ MenuItem {
         }
     }
 
-    AdvancedSection {
-        InfoMessageSmall {
-            id: fovWarning;
-            show: fov.value > 1.0 && croppingMode.currentIndex > 0;
-            text: qsTr("FOV is greater than 1.0, you may see black borders");
-        }
-
-        Label {
-            position: Label.LeftPosition;
-            text: qsTr("FOV");
+    Label {
+        position: Label.LeftPosition;
+        text: qsTr("FOV");
+        Column {
+            width: parent.width;
+            spacing: 2 * dpiScale;
             SliderWithField {
                 id: fov;
                 from: 0.1;
@@ -558,6 +634,36 @@ MenuItem {
                 keyframe: "Fov";
                 onValueChanged: controller.fov = value;
             }
+            // Display current horizontal/vertical FOV in degrees
+            BasicText {
+                id: fovAnglesLabel;
+                property int _rev: 0
+                width: parent.width;
+                text: {
+                    // Depend on fov.value to re-evaluate
+                    fov.value;
+                    // Re-evaluate when recompute finishes (params/fovs up to date)
+                    fovAnglesLabel._rev;
+                    const arr = controller.get_fov_angles_deg();
+                    const h = arr.length >= 1 ? arr[0] : 0.0;
+                    const v = arr.length >= 2 ? arr[1] : 0.0;
+                    return qsTr("HFOV: %1°, VFOV: %2°").arg(h.toFixed(1)).arg(v.toFixed(1));
+                }
+            }
+            Connections {
+                target: controller
+                function onCompute_progress(id, progress) {
+                    if (progress >= 1.0) { fovAnglesLabel._rev++; }
+                }
+            }
+        }
+    }
+
+    AdvancedSection {
+        InfoMessageSmall {
+            id: fovWarning;
+            show: fov.value > 1.0 && croppingMode.currentIndex > 0;
+            text: qsTr("FOV is greater than 1.0, you may see black borders");
         }
 
         CheckBoxWithContent {

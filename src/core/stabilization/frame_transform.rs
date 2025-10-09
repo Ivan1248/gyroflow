@@ -15,7 +15,7 @@ pub struct FrameTransform {
     pub fov: f64,
     pub minimal_fov: f64,
     pub focal_length: Option<f64>,
-    pub mesh_data: Vec<f32>,
+    pub mesh_data: Vec<f32>,  // mesh correction data for lens distortions
 }
 
 impl FrameTransform {

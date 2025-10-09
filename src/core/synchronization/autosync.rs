@@ -56,7 +56,7 @@ impl AutosyncProcess {
 
         drop(params);
 
-        if duration_ms < 10.0 || frame_count < 2 || time_per_syncpoint < 10.0 || search_size < 10.0 { return Err(()); }
+        if duration_ms < 10.0 || (mode != "estimate_motion_from_video" && (frame_count < 2 || time_per_syncpoint < 10.0 || search_size < 10.0)) { return Err(()); }
 
         let mut ranges_us: Vec<(i64, i64)> = timestamps_fract.iter().map(|x| {
             let range = (
@@ -66,8 +66,10 @@ impl AutosyncProcess {
             ((range.0 * 1000.0).round() as i64, (range.1 * 1000.0).round() as i64)
         }).collect();
 
-        if mode == "synchronize" && !stab.gyro.read().has_motion() {
-            // If no gyro data in file, analyze the entire video
+        if mode == "synchronize" && !stab.gyro.read().has_motion()
+        || mode == "estimate_motion_from_video" {
+            // If no gyro data in file or computing motion estimates, analyze the entire video:
+            // set a single range covering the entire video (org_duration_ms is video duration)
             ranges_us.clear();
             ranges_us.push((0, (org_duration_ms * 1000.0).round() as i64));
         }
@@ -81,7 +83,9 @@ impl AutosyncProcess {
 
         estimator.every_nth_frame.store(every_nth_frame.max(1) as u32, SeqCst);
         estimator.offset_method.store(sync_params.offset_method as u32, SeqCst);
-        estimator.pose_method.store(sync_params.pose_method as u32, SeqCst);
+        *estimator.pose_config.write() = sync_params.pose_method.clone();
+        // Clear previous pose results to ensure motion_samples reflect new settings
+        estimator.clear();
 
         let mut comp_params = ComputeParams::from_manager(stab);
         comp_params.keyframes.clear();
@@ -192,25 +196,29 @@ impl AutosyncProcess {
 
         self.estimator.process_detected_frames(self.org_fps, self.scaled_fps, &self.compute_params.read());
         self.estimator.recalculate_gyro_data(self.org_fps, true);
+        // Compute and cache optical flow after all frames are processed, before finishing
         self.estimator.cache_optical_flow(if offset_method == 1 { 2 } else { 1 });
         self.estimator.cleanup();
 
-        let mut scaled_ranges_us = Cow::Borrowed(&self.scaled_ranges_us);
-
-        if self.mode == "synchronize" && !self.compute_params.read().gyro.read().has_motion() {
-            // If no gyro data in file, set the computed optical flow as gyro data
+        // Update gyro_source with the computed estimated motion data
+        let duration_ms = {
             let compute_params = self.compute_params.write();
             let mut gyro = compute_params.gyro.write();
-
-            gyro.file_metadata.set_raw_imu(self.estimator.estimated_gyro.read().values().cloned().collect::<Vec<_>>());
-            gyro.apply_transforms();
-
+            gyro.set_estimated_gyro(self.estimator.estimated_gyro.read().clone());
+            // Note: integrate() is called in the recomputation pipeline to avoid deadlock
+            gyro.duration_ms
+        };
+        
+        let mut scaled_ranges_us = Cow::Borrowed(&self.scaled_ranges_us);
+        
+        if self.mode == "synchronize" && !self.compute_params.read().gyro.read().has_motion() {
+            // Dummy sync point at the middle of the video with duration 0
             let timestamps_fract = [0.5];
-            let time_per_syncpoint = 500.0;
-
+            let time_per_syncpoint = 0.0;
+            let fps_scale = self.fps_scale.unwrap_or(1.0);
             scaled_ranges_us = Cow::Owned(timestamps_fract.into_iter().map(|x| (
-                (((x * gyro.duration_ms) - (time_per_syncpoint / 2.0)).max(0.0)              * 1000.0 / self.fps_scale.unwrap_or(1.0)).round() as i64,
-                (((x * gyro.duration_ms) + (time_per_syncpoint / 2.0)).min(gyro.duration_ms) * 1000.0 / self.fps_scale.unwrap_or(1.0)).round() as i64
+                (((x * duration_ms) - (time_per_syncpoint / 2.0)).max(0.0)         * 1000.0 / fps_scale).round() as i64,
+                (((x * duration_ms) + (time_per_syncpoint / 2.0)).min(duration_ms) * 1000.0 / fps_scale).round() as i64
             )).collect());
         }
 
@@ -246,7 +254,10 @@ impl AutosyncProcess {
                 if !self.cancel_flag.load(SeqCst) {
                     cb(Either::Right(guessed));
                 }
-            } else {
+            } else if self.mode == "estimate_motion_from_video" {
+                // Motion estimation only - skip offset finding, just signal completion
+                cb(Either::Left(vec![]));
+            } else {  // self.mode == "synchronize"
                 let offsets = self.estimator.find_offsets(&scaled_ranges_us, &self.sync_params, &self.compute_params.read(), progress_cb2, self.cancel_flag.clone());
                 if check_negative {
                     for_negative.store(true, SeqCst);

@@ -2,6 +2,7 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 pub mod gyro_source;
+pub mod gps;
 pub mod imu_integration;
 pub mod lens_profile;
 pub mod lens_profile_database;
@@ -107,6 +108,8 @@ pub struct StabilizationManager {
     pub params: Arc<RwLock<StabilizationParams>>,
 
     pub sync_data: Arc<RwLock<SyncData>>,
+
+    pub gps: Arc<RwLock<crate::gps::source::GpsSource>>,
 }
 
 impl Default for StabilizationManager {
@@ -145,11 +148,64 @@ impl Default for StabilizationManager {
             camera_id: Arc::new(RwLock::new(None)),
 
             sync_data: Arc::new(RwLock::new(SyncData::default())),
+
+            gps: Arc::new(RwLock::new(crate::gps::source::GpsSource::default())),
         }
     }
 }
 
 impl StabilizationManager {
+    // ---------------- GPS façade ----------------
+    pub fn set_gpx_track(&self, track: crate::gps::GPSTrack) {
+        let mut gps = self.gps.write();
+        gps.set_track(track);
+    }
+    pub fn get_gpx_summary(&self) -> serde_json::Value {
+        self.gps.read().summary_json(self.params.read().duration_ms)
+    }
+    pub fn get_gps_offset_ms(&self) -> f64 { self.gps.read().offset_ms }
+    pub fn set_gps_offset_ms(&self, offset_ms: f64) { self.gps.write().offset_ms = offset_ms; }
+    pub fn clear_gps_data(&self) { self.gps.write().clear_data(); }
+    pub fn get_gps_use_processed_motion(&self) -> bool { self.gps.read().use_processed_motion }
+    pub fn set_gps_use_processed_motion(&self, use_processed_motion: bool) { self.gps.write().use_processed_motion = use_processed_motion; }
+    pub fn get_gps_sync_mode(&self) -> i32 {
+        match self.gps.read().sync_mode { crate::gps::source::GPSSyncMode::Off => 0, crate::gps::source::GPSSyncMode::Auto => 1, crate::gps::source::GPSSyncMode::Manual => 2 }
+    }
+    pub fn set_gps_sync_mode(&self, mode: i32) {
+        use crate::gps::source::GPSSyncMode as M;
+        self.gps.write().set_sync_mode(match mode { 1 => M::Auto, 2 => M::Manual, _ => M::Off });
+    }
+    pub fn get_gps_anchor(&self) -> String {
+        use crate::gps::source::TimeAlignment;
+        let gps = self.gps.read();
+        if let Some(track) = gps.track.as_ref() {
+            let alignment = TimeAlignment::compute(track, self.params.read().duration_ms, true, gps.offset_ms);
+            alignment.anchor.as_label().to_string()
+        } else {
+            "".to_string()
+        }
+    }
+    pub fn get_gps_overlap(&self) -> f64 {
+        use crate::gps::source::TimeAlignment;
+        let gps = self.gps.read();
+        if let Some(track) = gps.track.as_ref() {
+            let alignment = TimeAlignment::compute(track, self.params.read().duration_ms, true, gps.offset_ms);
+            alignment.overlap_ratio
+        } else {
+            0.0
+        }
+    }
+    pub fn get_gps_sync_quality(&self) -> f64 { 
+        // Quality could be based on overlap ratio, RMS error, etc.
+        // For now, return overlap ratio as a simple quality metric
+        self.get_gps_overlap()
+    }
+    pub fn get_gps_track(&self) -> Option<crate::gps::GPSTrack> { self.gps.read().track.clone() }
+    pub fn get_gps_speed_threshold(&self) -> f64 { self.gps.read().get_speed_threshold() }
+    pub fn set_gps_speed_threshold(&self, threshold: f64) { self.gps.write().set_speed_threshold(threshold); }
+    pub fn get_gps_max_time_offset(&self) -> f64 { self.gps.read().get_max_time_offset() }
+    pub fn set_gps_max_time_offset(&self, shift: f64) { self.gps.write().set_max_time_offset(shift); }
+    
     pub fn init_from_video_data(&self, duration_ms: f64, fps: f64, frame_count: usize, video_size: (usize, usize)) {
         {
             let mut params = self.params.write();
@@ -479,7 +535,7 @@ impl StabilizationManager {
                     let smoothing = self.smoothing.read();
                     let horizon_lock = smoothing.horizon_lock.clone();
 
-                    let (quats, max_angles) = self.gyro.read().recompute_smoothness(smoothing.current().as_ref(), horizon_lock, &params);
+                    let (quats, max_angles) = self.gyro.read().recompute_smoothness(smoothing.current().as_ref(), horizon_lock, smoothing.motion_direction.as_ref(), &params);
                     let mut gyro = self.gyro.write();
                     gyro.max_angles = max_angles;
                     gyro.smoothed_quaternions = quats;
@@ -507,7 +563,7 @@ impl StabilizationManager {
         let smoothing = self.smoothing.read();
         let horizon_lock = smoothing.horizon_lock.clone();
 
-        let (quats, max_angles) = self.gyro.read().recompute_smoothness(smoothing.current().as_ref(), horizon_lock, &params);
+        let (quats, max_angles) = self.gyro.read().recompute_smoothness(smoothing.current().as_ref(), horizon_lock, smoothing.motion_direction.as_ref(), &params);
         let mut gyro = self.gyro.write();
         gyro.max_angles = max_angles;
         gyro.smoothed_quaternions = quats;
@@ -553,15 +609,15 @@ impl StabilizationManager {
             // std::thread::sleep(std::time::Duration::from_millis(20));
             if prevent_recompute.load(SeqCst) { return cb((compute_id, true)); } // we're still loading, don't recompute
             if current_compute_id.load(SeqCst) != compute_id { return cb((compute_id, true)); }
-
+            
             let mut smoothing_changed = false;
             if smoothing.read().get_state_checksum(gyro_checksum) != smoothing_checksum.load(SeqCst) {
-                let (mut smoothing, horizon_lock) = {
+                let (mut smoothing, horizon_lock, motion_dir) = {
                     let lock = smoothing.read();
-                    (lock.current().clone(), lock.horizon_lock.clone())
+                    (lock.current().clone(), lock.horizon_lock.clone(), lock.motion_direction.clone())
                 };
 
-                let (quats, max_angles) = gyro.read().recompute_smoothness(smoothing.as_mut(), horizon_lock, &params);
+                let (quats, max_angles) = gyro.read().recompute_smoothness(smoothing.as_mut(), horizon_lock, motion_dir.as_ref(), &params);
 
                 if current_compute_id.load(SeqCst) != compute_id { return cb((compute_id, true)); }
                 if gyro_checksum != gyro.read().get_checksum() { return cb((compute_id, true)); }
@@ -570,6 +626,7 @@ impl StabilizationManager {
                 lib_gyro.max_angles = max_angles;
                 lib_gyro.smoothed_quaternions = quats;
                 lib_gyro.smoothing_status = smoothing.get_status_json();
+                lib_gyro.motion_direction_status = if let Some(md) = motion_dir.as_ref() { md.get_status_json() } else { serde_json::Value::Array(vec![]) };
                 gyro_checksum = lib_gyro.get_checksum();
                 smoothing_changed = true;
             }
@@ -633,11 +690,11 @@ impl StabilizationManager {
                         if current_compute_id.load(SeqCst) != compute_id { return cb((compute_id, true)); }
 
                         // Smoothing
-                        let (mut smoothing, horizon_lock) = {
+                        let (mut smoothing, horizon_lock, motion_dir) = {
                             let lock = smoothing.read();
-                            (lock.current().clone(), lock.horizon_lock.clone())
+                            (lock.current().clone(), lock.horizon_lock.clone(), lock.motion_direction.clone())
                         };
-                        let (quats, max_angles) = gyro.read().recompute_smoothness(smoothing.as_mut(), horizon_lock, &params);
+                        let (quats, max_angles) = gyro.read().recompute_smoothness(smoothing.as_mut(), horizon_lock, motion_dir.as_ref(), &params);
 
                         if current_compute_id.load(SeqCst) != compute_id { return cb((compute_id, true)); }
 
@@ -646,6 +703,7 @@ impl StabilizationManager {
                             lib_gyro.max_angles = max_angles;
                             lib_gyro.smoothed_quaternions = quats;
                             lib_gyro.smoothing_status = smoothing.get_status_json();
+                            lib_gyro.motion_direction_status = if let Some(md) = motion_dir.as_ref() { md.get_status_json() } else { serde_json::Value::Array(vec![]) };
                         }
 
                         // Zooming
@@ -694,27 +752,130 @@ impl StabilizationManager {
         }
         ret
     }
-    pub fn get_opticalflow_pixels(&self, timestamp_us: i64, num_frames: usize, size: (usize, usize)) -> Option<Vec<(i32, i32, usize)>> { // (x, y, alpha)
-        let mut ret = None;
-        for i in 0..num_frames {
-            match self.pose_estimator.get_of_lines_for_timestamp(&timestamp_us, i, 1.0, 1, false) {
-                (Some(lines), Some(frame_size)) => {
-                    let ratio = size.1 as f32 / frame_size.1.max(1) as f32;
-                    lines.0.1.into_iter().zip(lines.1.1.into_iter()).for_each(|(p1, p2)| {
-                        if ret.is_none() {
-                            // Only allocate if we actually have any points
-                            ret = Some(Vec::with_capacity(2048));
-                        }
-                        let line = line_drawing::Bresenham::new(((p1.0 * ratio) as isize, (p1.1 * ratio) as isize), ((p2.0 * ratio) as isize, (p2.1 * ratio) as isize));
-                        for point in line {
-                            ret.as_mut().unwrap().push((point.0 as i32, point.1 as i32, i));
-                        }
-                    });
-                }
-                _ => { }
-            }
+
+    fn get_projection_params(&self, timestamp_us: i64, size: (usize, usize)) -> (stabilization::ComputeParams, nalgebra::Matrix3<f64>, [f64; 12]) {
+        let ts_ms = timestamp_us as f64 / 1000.0;
+        let params = stabilization::ComputeParams::from_manager(self);
+        let (camera_matrix, distortion_coeffs, _radial_limit, _sx, _sy, _fl) = stabilization::FrameTransform::get_lens_data_at_timestamp(&params, ts_ms, false);
+        (params, camera_matrix, distortion_coeffs)
+    }
+
+    fn project_to_2d(&self, dir: nalgebra::Vector3<f64>, size: (usize, usize), camera_matrix: &nalgebra::Matrix3<f64>, distortion_coeffs: &[f64; 12], params: &stabilization::ComputeParams) -> (f64, f64) {
+        // Normalize and ensure forward z
+        let mut d = dir;
+        let n = d.norm();
+        if n > 0.0 { d /= n; }
+        if d.z <= 1e-6 { d.z = 1e-6; }
+
+        let fx = camera_matrix[(0, 0)];
+        let fy = camera_matrix[(1, 1)];
+        let cx = camera_matrix[(0, 2)];
+        let cy = camera_matrix[(1, 2)];
+
+        // Convert to normalized camera coords, then distort
+        let kp = stabilization::KernelParams {
+            width: size.0 as i32,
+            height: size.1 as i32,
+            f: [fx as f32, fy as f32],
+            c: [cx as f32, cy as f32],
+            k: distortion_coeffs.iter().map(|v| *v as f32).collect::<Vec<_>>().try_into().unwrap(),
+            ..Default::default()
+        };
+        let dm = params.distortion_model.clone();
+        let uv = dm.distort_point((d.x / d.z) as f32, (d.y / d.z) as f32, 1.0, &kp);
+        let u = (uv.0 as f64) * fx + cx;
+        let v = (uv.1 as f64) * fy + cy;
+        (u, v)
+    }
+
+    fn draw_motion_direction(&self, drawing: &mut DrawCanvas, timestamp_us: i64, size: (usize, usize), y_inverted: bool) {
+        // Get motion direction data or use default
+        let window_us: i64 = 50_000; // 50ms, no smoothing for visualization
+        let (tdir, qual, color) = if let Some((tdir, qual)) = self.pose_estimator.get_transl_dir_near(timestamp_us, window_us, false) {
+            (tdir, qual, if tdir[2] > 0.0 { Color::Red } else { Color::Green })
+        } else {
+            // No motion data available, use default direction (forward)
+            ([0.0, 0.0, 1.0], crate::synchronization::PoseQuality::default(), Color::None)
+        };
+        
+        // Project direction to 2D using intrinsics and distortion at this timestamp
+        let (params, camera_matrix, distortion_coeffs) = self.get_projection_params(timestamp_us, size);
+        
+        // Flip sign to get correct forward motion direction and project to 2D
+        let dir_cam = (if tdir[2] <= 0.0 { -1.0 } else { 1.0 }) * nalgebra::Vector3::new(tdir[0], tdir[1], tdir[2]);
+        let (u, v) = self.project_to_2d(dir_cam, size, &camera_matrix, &distortion_coeffs, &params);
+        
+        // Draw a line from the optical axis (principal point) to the projected point
+        let start = (camera_matrix[(0, 2)].round() as isize, camera_matrix[(1, 2)].round() as isize);
+        // Clamp to stay inside of view bounds
+        let end = (u.clamp(0f64, size.0 as f64) as isize, v.clamp(0f64, size.1 as f64) as isize);
+        let line = line_drawing::Bresenham::new(start, end);
+        for point in line {
+            drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 1);
         }
-        ret
+        // Draw a circle around the point
+        let circle = line_drawing::BresenhamCircle::new(u as isize, v as isize, 15);
+        for point in circle {
+            drawing.put_pixel(point.0 as i32, point.1 as i32, color, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
+        }
+    }
+
+    fn draw_spherical_grid(&self, drawing: &mut DrawCanvas, timestamp_us: i64, size: (usize, usize), y_inverted: bool) {
+        let (params, camera_matrix, distortion_coeffs) = self.get_projection_params(timestamp_us, size);
+
+        // Draw function using existing undistortion/projection to ensure correctness
+        let mut draw_polyline = |pts: &[(f64, f64)]| {
+            let mut prev: Option<(i32, i32)> = None;
+            for &(u, v) in pts {
+                let x = u.round() as i32;
+                let y = v.round() as i32;
+                if let Some((px, py)) = prev {
+                    // Limit line length to prevent extremely long Bresenham lines that could cause performance issues
+                    let dx = (x - px).abs();
+                    let dy = (y - py).abs();
+                    if dx < 2000 && dy < 2000 { // Reasonable limit for 4K+ displays
+                        let line = line_drawing::Bresenham::new((px as isize, py as isize), (x as isize, y as isize));
+                        for pnt in line { drawing.put_pixel(pnt.0 as i32, pnt.1 as i32, Color::Blue3, Alpha::Alpha50, Stage::OnInput, y_inverted, 1); }
+                    }
+                }
+                prev = Some((x, y));
+            }
+        };
+
+        // Sampling resolution
+        let steps_lon = 360 / 3; // 3° steps for smoothness
+        let steps_lat = 180 / 3;
+
+        // Meridians (constant longitude), every 45° (8 meridians total)
+        // Rotated coordinate system: pole at center of original FOV
+        for lon_deg in (-180..=180).step_by(45) {
+            // Skip 180 duplicate of -180 to avoid overdraw
+            if lon_deg == 180 { continue; }
+            let lon = (lon_deg as f64).to_radians();
+            let mut poly: Vec<(f64, f64)> = Vec::new();
+            for i in 0..=steps_lat {
+                let lat = (-90.0 + i as f64 * (180.0 / steps_lat as f64)).to_radians();
+                let clat = lat.cos();
+                // Rotate coordinate system: X-right, Y-up, Z-forward -> X-right, Y-forward, Z-up
+                // This places the north pole (Z=1) at the center of the original field of view
+                let dir = nalgebra::Vector3::new(clat * lon.cos(), clat * lon.sin(), lat.sin()); // X-right, Y-forward, Z-up
+                poly.push(self.project_to_2d(dir, size, &camera_matrix, &distortion_coeffs, &params));
+            }
+            if poly.len() > 1 { draw_polyline(&poly); }
+        }
+
+        // Parallels (constant latitude), every 15°
+        for lat_deg in (-75..=75).step_by(15) { // avoid +/-90 singularities
+            let lat = (lat_deg as f64).to_radians();
+            let mut poly: Vec<(f64, f64)> = Vec::new();
+            for i in 0..=steps_lon {
+                let lon = (-180.0 + i as f64 * (360.0 / steps_lon as f64)).to_radians();
+                let clat = lat.cos();
+                let dir = nalgebra::Vector3::new(clat * lon.cos(), clat * lon.sin(), lat.sin());
+                poly.push(self.project_to_2d(dir, size, &camera_matrix, &distortion_coeffs, &params));
+            }
+            if poly.len() > 1 { draw_polyline(&poly); }
+        }
     }
 
     pub fn draw_overlays(&self, drawing: &mut DrawCanvas, timestamp_us: i64) {
@@ -727,20 +888,42 @@ impl StabilizationManager {
 
             if p.show_optical_flow {
                 let num_frames = if p.of_method == 2 { 1 } else { 3 };
-                if let Some(pxs) = self.get_opticalflow_pixels(timestamp_us, num_frames, size) {
-                    for (x, y, a) in pxs {
-                        let a = Alpha::from(a as u8);
-                        drawing.put_pixel(x, y, Color::Yellow, a, Stage::OnInput, y_inverted, 1);
+                // Inlined get_opticalflow_pixels with start point coloring
+                for i in 0..num_frames {
+                    match self.pose_estimator.get_of_lines_for_timestamp(&timestamp_us, i, 1.0, 1, false) {
+                        (Some(lines), Some(frame_size)) => {
+                            let ratio = size.1 as f32 / frame_size.1.max(1) as f32;
+                            lines.0.1.into_iter().zip(lines.1.1.into_iter()).for_each(|(p1, p2)| {
+                                // Draw the start point in a consistent color to distinguish from the line
+                                drawing.put_pixel((p1.0 * ratio) as i32, (p1.1 * ratio) as i32, Color::Green, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
+                                // Draw the line
+                                let line = line_drawing::Bresenham::new(((p1.0 * ratio) as isize, (p1.1 * ratio) as isize), ((p2.0 * ratio) as isize, (p2.1 * ratio) as isize));
+                                for point in line {
+                                    drawing.put_pixel(point.0 as i32, point.1 as i32, Color::Yellow, Alpha::Alpha100, Stage::OnInput, y_inverted, 1);
+                                }
+                            });
+                        }
+                        _ => { }
                     }
                 }
             }
+            // Points at detected features if a sparse method is used
             if p.show_detected_features {
                 if let Some(pxs) = self.get_features_pixels(timestamp_us, size) {
                     for (x, y) in pxs {
-                        drawing.put_pixel(x, y, Color::Green, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
+                        drawing.put_pixel(x, y, Color::Green, Alpha::Alpha100, Stage::OnInput, y_inverted, 5);
                     }
                 }
             }
+            // A line from the optical axis to the motion direction and a circle around the motion direction
+            if p.show_motion_direction {
+                self.draw_motion_direction(drawing, timestamp_us, size, y_inverted);
+            }
+            // Spherical grid overlay (meridians/parallels every 15 degrees) with pole on the optical axis
+            if p.show_spherical_grid {
+                self.draw_spherical_grid(drawing, timestamp_us, size, y_inverted);
+            }
+            // Draw chessboard corners if calibrator is enabled
             #[cfg(feature = "opencv")]
             if p.is_calibrator {
                 let lock = self.lens_calibrator.read();
@@ -751,6 +934,7 @@ impl StabilizationManager {
                     }
                 }
             }
+            // Draw zooming debug points
             if !p.zooming_debug_points.is_empty() {
                 if let Some((_, points)) = p.zooming_debug_points.range(timestamp_us - 1000..).next() {
                     for i in 0..points.len() {
@@ -833,8 +1017,22 @@ impl StabilizationManager {
     }
 
     pub fn set_of_method(&self, v: u32) { self.params.write().of_method = v; self.pose_estimator.clear(); }
+    pub fn set_pose_method(&self, v: u32) {
+        let method_str = match v { 
+            0 => "EssentialLMEDS", 
+            1 => "EssentialRANSAC", 
+            2 => "Almeida", 
+            3 => "EightPoint", 
+            4 => "Homography", 
+            _ => "EssentialLMEDS" 
+        };
+        *self.pose_estimator.pose_config.write() = method_str.to_string();
+        self.pose_estimator.clear();
+    }
     pub fn set_show_detected_features(&self, v: bool) { self.params.write().show_detected_features = v; }
     pub fn set_show_optical_flow     (&self, v: bool) { self.params.write().show_optical_flow      = v; }
+    pub fn set_show_motion_direction (&self, v: bool) { self.params.write().show_motion_direction  = v; }
+    pub fn set_show_spherical_grid   (&self, v: bool) { self.params.write().show_spherical_grid    = v; }
     pub fn set_stab_enabled          (&self, v: bool) { self.params.write().stab_enabled           = v; }
     pub fn set_frame_readout_time    (&self, v: f64)  { self.params.write().frame_readout_time     = v; }
     pub fn set_frame_readout_direction(&self, v: impl Into<ReadoutDirection>) { self.params.write().frame_readout_direction = v.into(); }
@@ -1045,6 +1243,24 @@ impl StabilizationManager {
         self.smoothing.read().get_names()
     }
 
+    pub fn set_motion_direction_alignment(&self, enabled: bool) {
+        let mut s = self.smoothing.write();
+        s.motion_direction = if enabled { Some(crate::smoothing::MotionDirectionAlignment::default()) } else { None };
+        drop(s);
+        self.invalidate_smoothing();
+    }
+    pub fn set_motion_direction_param(&self, name: &str, val: f64) {
+        self.smoothing.write().set_motion_direction_param(name, val);
+        self.invalidate_smoothing();
+    }
+    pub fn load_motion_direction_params(&self, params_json: &serde_json::Value) {
+        self.smoothing.write().load_motion_direction_from_params(params_json);
+        self.invalidate_smoothing();
+    }
+    pub fn get_motion_direction_status(&self) -> serde_json::Value {
+        self.gyro.read().motion_direction_status.clone()
+    }
+
     pub fn get_cloned(&self) -> StabilizationManager {
         StabilizationManager {
             params: Arc::new(RwLock::new(self.params.read().clone())),
@@ -1054,10 +1270,10 @@ impl StabilizationManager {
             smoothing:  Arc::new(RwLock::new(self.smoothing.read().clone())),
             input_file: Arc::new(RwLock::new(self.input_file.read().clone())),
             lens_profile_db: self.lens_profile_db.clone(),
+            pose_estimator: Arc::new(self.pose_estimator.clone_isolated()),  // not complete clone
 
             // NOT cloned:
             // stabilization
-            // pose_estimator
             // lens_calibrator
             // current_compute_id
             // smoothing_checksum
@@ -1089,6 +1305,7 @@ impl StabilizationManager {
         self.keyframes.write().clear();
 
         self.pose_estimator.clear();
+        self.clear_gps_data();
     }
 
     pub fn override_video_fps(&self, fps: f64, recompute: bool) {
@@ -1135,7 +1352,7 @@ impl StabilizationManager {
         let gyro = self.gyro.read();
         let params = self.params.read();
 
-        let (smoothing_name, smoothing_params, horizon_amount, horizon_lock) = {
+        let (smoothing_name, smoothing_params, horizon_amount, horizon_lock, motion_direction_params) = {
             let smoothing_lock = self.smoothing.read();
             let smoothing = smoothing_lock.current();
 
@@ -1155,7 +1372,7 @@ impl StabilizationManager {
                 horizon_amount = 0.0;
             }
 
-            (smoothing.get_name(), parameters, horizon_amount, smoothing_lock.horizon_lock.clone())
+            (smoothing.get_name(), parameters, horizon_amount, smoothing_lock.horizon_lock.clone(), smoothing_lock.get_motion_direction_params_json())
         };
 
         let input_file = self.input_file.read().clone();
@@ -1208,6 +1425,7 @@ impl StabilizationManager {
                 "horizon_lock_pitch":     horizon_lock.horizonpitch,
                 "use_gravity_vectors":    gyro.use_gravity_vectors,
                 "horizon_lock_integration_method": gyro.horizon_lock_integration_method,
+                "motion_direction_params": motion_direction_params,
                 "video_speed":                   params.video_speed,
                 "video_speed_affects_smoothing": params.video_speed_affects_smoothing,
                 "video_speed_affects_zooming":   params.video_speed_affects_zooming,
@@ -1280,6 +1498,13 @@ impl StabilizationManager {
                 util::compress_to_base91_cbor(&gyro.quaternions)         .and_then(|s| obj.insert("integrated_quaternions".into(), serde_json::Value::String(s)));
                 util::compress_to_base91_cbor(&gyro.smoothed_quaternions).and_then(|s| obj.insert("smoothed_quaternions"  .into(), serde_json::Value::String(s)));
                 util::compress_to_base91_cbor(&params.fovs)              .and_then(|s| obj.insert("adaptive_zoom_fovs"    .into(), serde_json::Value::String(s)));
+                
+                // Save motion vectors (sync_results) for motion direction alignment
+                if let Some(sync_results) = self.pose_estimator.sync_results.try_read() {
+                    if !sync_results.is_empty() {
+                        util::compress_to_base91_cbor(&*sync_results).and_then(|s| obj.insert("motion_from_video".into(), serde_json::Value::String(s)));
+                    }
+                }
             }
         }
 
@@ -1491,12 +1716,18 @@ impl StabilizationManager {
                 if let Some(v) = obj.get("acc_rotation") { let v: [f64; 3] = serde_json::from_value(v.clone()).unwrap_or_default(); gyro.imu_transforms.set_acc_rotation(v[0], v[1], v[2]); }
                 if let Some(v) = obj.get("gyro_bias")    { gyro.imu_transforms.gyro_bias = serde_json::from_value(v.clone()).ok(); }
 
+                // Load motion vectors (sync_results) if present
+                if let Ok(motion_from_video) = util::decompress_from_base91_cbor::<BTreeMap<i64, crate::synchronization::FrameResult>>(obj.get("motion_from_video").and_then(|x| x.as_str()).unwrap_or_default()) {
+                    *self.pose_estimator.sync_results.write() = motion_from_video;
+                }
+
                 obj.remove("raw_imu");
                 obj.remove("quaternions");
                 obj.remove("smoothed_quaternions");
                 obj.remove("image_orientations");
                 obj.remove("gravity_vectors");
                 obj.remove("file_metadata");
+                obj.remove("motion_from_video");
             }
             if let Some(lens) = obj.get("calibration_data") {
                 let mut l = self.lens.write();
@@ -1969,6 +2200,21 @@ pub enum GyroflowCoreError {
 
     #[error("IO error {0:?}")]
     IOError(#[from] std::io::Error),
+
+    #[error("XML parsing error {0:?}")]
+    XMLParsingError(#[from] quick_xml::Error),
+
+    #[error("Chrono error {0:?}")]
+    ChronoError(#[from] chrono::ParseError),
+
+    #[error("GPX parsing error: {0}")]
+    GPXParsingError(String),
+
+    #[error("No GPS track loaded")]
+    NoGPSTrackLoaded,
+
+    #[error("GPX export error: {0}")]
+    GPXExportError(String),
 
     #[error("Unknown error")]
     Unknown

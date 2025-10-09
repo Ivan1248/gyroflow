@@ -1,0 +1,103 @@
+# Maintainer: Gyroflow Team <team@gyroflow.xyz>
+pkgname=gyroflow
+pkgver=1.6.3
+pkgrel=1
+pkgdesc="Video stabilization using gyroscope data"
+arch=('x86_64' 'aarch64')
+url="https://gyroflow.xyz"
+license=('GPL3')
+depends=(
+    'qt6-base'
+    'qt6-declarative'
+    'qt6-quickcontrols2'
+    'qt6-svg'
+    'qt6-wayland'
+    'ffmpeg'
+    'opencv'
+    'libva'
+    'libvdpau'
+    'mesa'
+    'ocl-icd'
+    'libpulse'
+    'alsa-lib'
+    'libxkbcommon'
+    'fontconfig'
+    'freetype2'
+)
+makedepends=(
+    'git'
+    'cargo'
+    'just'
+    'cmake'
+    'ninja'
+    'clang'
+    'llvm'
+    'python'
+    'python-pip'
+    'p7zip'
+)
+source=("git+https://github.com/gyroflow/gyroflow.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "${srcdir}/gyroflow"
+    git submodule update --init --recursive
+}
+
+build() {
+    cd "${srcdir}/gyroflow"
+    
+    # Install dependencies
+    just arch install-deps
+    
+    # Build the application
+    just arch build
+}
+
+package() {
+    cd "${srcdir}/gyroflow"
+    
+    # Install the application
+    just arch deploy
+    
+    # Copy files to package directory
+    install -Dm755 "_deployment/_binaries/linux64/gyroflow" "${pkgdir}/usr/bin/gyroflow"
+    
+    # Copy libraries
+    install -d "${pkgdir}/usr/lib/gyroflow"
+    cp -r "_deployment/_binaries/linux64/lib"/* "${pkgdir}/usr/lib/gyroflow/"
+    
+    # Copy QML files
+    install -d "${pkgdir}/usr/lib/gyroflow/qml"
+    cp -r "_deployment/_binaries/linux64/qml"/* "${pkgdir}/usr/lib/gyroflow/qml/"
+    
+    # Copy plugins
+    install -d "${pkgdir}/usr/lib/gyroflow/plugins"
+    cp -r "_deployment/_binaries/linux64/plugins"/* "${pkgdir}/usr/lib/gyroflow/plugins/"
+    
+    # Copy camera presets
+    install -d "${pkgdir}/usr/share/gyroflow/camera_presets"
+    cp -r "_deployment/_binaries/linux64/camera_presets"/* "${pkgdir}/usr/share/gyroflow/camera_presets/"
+    
+    # Create desktop file
+    install -d "${pkgdir}/usr/share/applications"
+    cat > "${pkgdir}/usr/share/applications/gyroflow.desktop" << EOF
+[Desktop Entry]
+Name=Gyroflow
+Comment=Video stabilization using gyroscope data
+Exec=gyroflow
+Icon=gyroflow
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;
+MimeType=video/mp4;video/avi;video/mov;video/mkv;
+EOF
+    
+    # Install icon
+    install -d "${pkgdir}/usr/share/icons/hicolor/256x256/apps"
+    install -m644 "_deployment/linux/gyroflow.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/gyroflow.png"
+    
+    # Install SVG icon
+    install -d "${pkgdir}/usr/share/icons/hicolor/scalable/apps"
+    install -m644 "_deployment/linux/gyroflow.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/gyroflow.svg"
+}

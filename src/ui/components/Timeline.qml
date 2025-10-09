@@ -174,7 +174,7 @@ Item {
         repeat: false;
         running: false;
         interval: 100;
-        property bool axes: false;
+        property bool axes: false;  // Set in triggerUpdateChart, called in setDisplayMode and updateDurations
         property bool zooming: false;
         onTriggered: {
             if (axes) {
@@ -188,7 +188,7 @@ Item {
         }
     }
 
-    function updateDurations(): void {
+    function updateDurations(): void {  // Called when IMU data is loaded or
         chart.setDurationMs(controller.get_scaled_duration_ms());
         keyframes.item.setDurationMs(controller.get_org_duration_ms());
         root.durationMs    = controller.get_scaled_duration_ms();
@@ -321,6 +321,16 @@ Item {
                             a5.text = "Y"; a5.tooltip = "Y";
                             a6.text = "Z"; a6.tooltip = "Z";
                             a7.text = "W"; a7.tooltip = qsTr("Angle");
+                        break;
+                        case 4: // GPS
+                            a3.visible = false;
+                            a7.visible = false;
+                            a0.text = "C"; a0.tooltip = qsTr("Course (deg)");
+                            a1.text = "Y"; a1.tooltip = qsTr("IMU yaw (deg, centered)");
+                            a2.text = "V"; a2.tooltip = qsTr("Speed (m/s)");
+                            a4.text = "C"; a4.tooltip = qsTr("Course (deg)");
+                            a5.text = "Y"; a5.tooltip = qsTr("IMU yaw (deg, centered)");
+                            a6.text = "V"; a6.tooltip = qsTr("Speed (m/s)");
                         break;
                     }
                 }
@@ -763,6 +773,7 @@ Item {
                     Action { checkable: true; checked: chart.viewMode === 1; text: qsTr("Accelerometer"); onTriggered: root.setDisplayMode(1); }
                     Action { checkable: true; checked: chart.viewMode === 2; text: qsTr("Magnetometer");  onTriggered: root.setDisplayMode(2); }
                     Action { checkable: true; checked: chart.viewMode === 3; text: qsTr("Quaternions");   onTriggered: root.setDisplayMode(3); }
+                    Action { checkable: true; checked: chart.viewMode === 4; text: qsTr("GPS");   onTriggered: root.setDisplayMode(4); }
                 }
                 Component.onCompleted: {
                     if (!isCalibrator) {

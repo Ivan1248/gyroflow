@@ -130,7 +130,6 @@ impl SmoothingAlgorithm for Plain {
         let mut q = *quats.iter().next().unwrap().1;
         let smoothed1: TimeQuat = quats.iter().map(|x| {
             let mut alpha = *alpha_per_timestamp.get(x.0).unwrap_or(&alpha);
-
             if let Some(scaler) = scalers.get(x.0) {
                 alpha /= *scaler;
             }
@@ -142,11 +141,9 @@ impl SmoothingAlgorithm for Plain {
         let mut q = *smoothed1.iter().next_back().unwrap().1;
         smoothed1.iter().rev().map(|x| {
             let mut alpha = *alpha_per_timestamp.get(x.0).unwrap_or(&alpha);
-
             if let Some(scaler) = scalers.get(x.0) {
                 alpha /= *scaler;
             }
-
             q = q.slerp(x.1, alpha);
             (*x.0, q)
         }).collect()

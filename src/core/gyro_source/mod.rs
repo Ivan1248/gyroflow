@@ -28,6 +28,25 @@ use crate::StabilizationParams;
 
 const DEG2RAD: f64 = std::f64::consts::PI / 180.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionDataSource {
+    TransformedRawImu,
+    FileMetadataRawImu,
+    EstimatedGyro,
+    None,
+}
+
+impl std::fmt::Display for MotionDataSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MotionDataSource::TransformedRawImu => write!(f, "transformed_raw_imu"),
+            MotionDataSource::FileMetadataRawImu => write!(f, "file_metadata_raw_imu"),
+            MotionDataSource::EstimatedGyro => write!(f, "estimated_gyro"),
+            MotionDataSource::None => write!(f, "none"),
+        }
+    }
+}
+
 pub type Quat64 = UnitQuaternion<f64>;
 pub type TimeIMU = telemetry_parser::util::IMUData;
 pub type TimeQuat = BTreeMap<i64, Quat64>; // key is timestamp_us
@@ -44,13 +63,16 @@ pub struct GyroSource {
 
     pub duration_ms: f64,
 
-    raw_imu: Vec<TimeIMU>,
+    transformed_imu: Vec<TimeIMU>,
 
     pub imu_transforms: IMUTransforms,
 
     pub integration_method: usize,
 
     pub quaternions: TimeQuat,
+    /// `smoothed_quaternions` are not the actual smoothed `quaternions`, but rather the quaternions 
+    /// that, when applied to the original orientation, produce the smoothed orientation.
+    /// See `actual_smoothed_quat_at_timestamp`` to get the actual smoothed quaternion.
     pub smoothed_quaternions: TimeQuat,
 
     pub use_gravity_vectors: bool,
@@ -59,10 +81,14 @@ pub struct GyroSource {
     pub max_angles: (f64, f64, f64), // (pitch, yaw, roll) in deg
 
     pub smoothing_status: serde_json::Value,
+    pub motion_direction_status: serde_json::Value,
 
     pub prevent_recompute: bool,
 
     pub file_metadata: ReadOnlyFileMetadata, // Once this is set, it's never modified
+
+    /// Estimated gyro data based on relative pose estimation
+    pub estimated_gyro: BTreeMap<i64, TimeIMU>,
 
     offsets: BTreeMap<i64, f64>, // <microseconds timestamp, offset in milliseconds>
     offsets_linear: BTreeMap<i64, f64>, // <microseconds timestamp, offset in milliseconds> - linear fit
@@ -81,8 +107,12 @@ impl GyroSource {
         }
     }
 
+    pub fn has_motion_from_metadata(&self) -> bool {
+        self.file_metadata.read().has_motion() 
+    }
+
     pub fn has_motion(&self) -> bool {
-        self.file_metadata.read().has_motion()
+        self.has_motion_from_metadata() || !self.estimated_gyro.is_empty()
     }
 
     pub fn set_use_gravity_vectors(&mut self, v: bool) {
@@ -462,7 +492,8 @@ impl GyroSource {
     pub fn clear(&mut self) {
         self.quaternions.clear();
         self.smoothed_quaternions.clear();
-        self.raw_imu.clear();
+        self.transformed_imu.clear();
+        self.estimated_gyro.clear();
         self.imu_transforms.imu_rotation = None;
         self.imu_transforms.acc_rotation = None;
         self.imu_transforms.imu_lpf = 0.0;
@@ -481,6 +512,7 @@ impl GyroSource {
 
         self.imu_transforms.imu_orientation = telemetry.imu_orientation.clone();
 
+        // Check data before moving telemetry
         let has_quats = !telemetry.quaternions.is_empty();
         let has_raw_imu = !telemetry.raw_imu.is_empty();
 
@@ -523,11 +555,17 @@ impl GyroSource {
     }
     pub fn integrate(&mut self) {
         let file_metadata = self.file_metadata.read();
+        let imu_data = self.get_motion_data();
+        let source_name = self.get_motion_data_source();
+        if !imu_data.is_empty() {
+            log::debug!("Integrating using {} with {} samples", source_name, imu_data.len());
+        }
+        
         match self.integration_method {
-            0 => {
+            0 => { // existing quaternions from metadata
                 self.quaternions = if file_metadata.detected_source.as_deref().unwrap_or("").starts_with("GoPro") && !file_metadata.quaternions.is_empty() && (file_metadata.gravity_vectors.is_none() || !self.use_gravity_vectors) {
                     log::info!("No gravity vectors - using accelerometer");
-                    QuaternionConverter::convert(self.horizon_lock_integration_method, &file_metadata.quaternions, file_metadata.image_orientations.as_ref().unwrap_or(&TimeQuat::default()), self.raw_imu(&file_metadata), self.duration_ms)
+                    QuaternionConverter::convert(self.horizon_lock_integration_method, &file_metadata.quaternions, file_metadata.image_orientations.as_ref().unwrap_or(&TimeQuat::default()), &imu_data, self.duration_ms)
                 } else {
                     file_metadata.quaternions.clone()
                 };
@@ -543,17 +581,17 @@ impl GyroSource {
                     }
                 }
             },
-            1 => self.quaternions = ComplementaryIntegrator  ::integrate(self.raw_imu(&file_metadata), self.duration_ms),
-            2 => self.quaternions = VQFIntegrator            ::integrate(self.raw_imu(&file_metadata), self.duration_ms),
-            3 => self.quaternions = SimpleGyroIntegrator     ::integrate(self.raw_imu(&file_metadata), self.duration_ms),
-            4 => self.quaternions = SimpleGyroAccelIntegrator::integrate(self.raw_imu(&file_metadata), self.duration_ms),
-            5 => self.quaternions = MahonyIntegrator         ::integrate(self.raw_imu(&file_metadata), self.duration_ms),
-            6 => self.quaternions = MadgwickIntegrator       ::integrate(self.raw_imu(&file_metadata), self.duration_ms),
+            1 => self.quaternions = ComplementaryIntegrator  ::integrate(&imu_data, self.duration_ms),
+            2 => self.quaternions = VQFIntegrator            ::integrate(&imu_data, self.duration_ms),
+            3 => self.quaternions = SimpleGyroIntegrator     ::integrate(&imu_data, self.duration_ms),
+            4 => self.quaternions = SimpleGyroAccelIntegrator::integrate(&imu_data, self.duration_ms),
+            5 => self.quaternions = MahonyIntegrator         ::integrate(&imu_data, self.duration_ms),
+            6 => self.quaternions = MadgwickIntegrator       ::integrate(&imu_data, self.duration_ms),
             _ => log::error!("Unknown integrator")
         }
     }
 
-    pub fn recompute_smoothness(&self, alg: &dyn SmoothingAlgorithm, horizon_lock: super::smoothing::horizon::HorizonLock, compute_params: &crate::ComputeParams) -> (TimeQuat, (f64, f64, f64)) {
+    pub fn recompute_smoothness(&self, alg: &dyn SmoothingAlgorithm, horizon_lock: super::smoothing::horizon::HorizonLock, motion_direction: Option<&super::smoothing::MotionDirectionAlignment>, compute_params: &crate::ComputeParams) -> (TimeQuat, (f64, f64, f64)) {
         let file_metadata = self.file_metadata.read();
         let mut smoothed_quaternions = self.quaternions.clone();
 
@@ -568,15 +606,12 @@ impl GyroSource {
             *q *= additional_rotation;
         }
 
-        if true {
-            // Lock horizon, then smooth
-            horizon_lock.lock(&mut smoothed_quaternions, &self.quaternions, &file_metadata.gravity_vectors, self.use_gravity_vectors, self.integration_method, compute_params);
-            smoothed_quaternions = alg.smooth(&smoothed_quaternions, self.duration_ms, compute_params);
-        } else {
-            // Smooth, then lock horizon
-            smoothed_quaternions = alg.smooth(&smoothed_quaternions, self.duration_ms, compute_params);
-            horizon_lock.lock(&mut smoothed_quaternions, &self.quaternions, &file_metadata.gravity_vectors, self.use_gravity_vectors, self.integration_method, compute_params);
+        // Motion direction, then lock horizon, then smooth
+        if let Some(md) = motion_direction {
+            smoothed_quaternions = md.apply(&smoothed_quaternions, self.duration_ms, compute_params);
         }
+        horizon_lock.lock(&mut smoothed_quaternions, &self.quaternions, &file_metadata.gravity_vectors, self.use_gravity_vectors, self.integration_method, compute_params);
+        smoothed_quaternions = alg.smooth(&smoothed_quaternions, self.duration_ms, compute_params);
 
         let max_angles = crate::Smoothing::get_max_angles(&self.quaternions, &smoothed_quaternions, compute_params);
 
@@ -587,9 +622,48 @@ impl GyroSource {
         (smoothed_quaternions, max_angles)
     }
 
-    pub fn raw_imu<'a>(&'a self, file_metadata: &'a FileMetadata) -> &'a Vec<TimeIMU> {
-        if !self.raw_imu.is_empty() { return &self.raw_imu }
-        return &file_metadata.raw_imu;
+    pub fn set_estimated_gyro(&mut self, estimated_gyro: BTreeMap<i64, TimeIMU>) {
+        self.estimated_gyro = estimated_gyro;
+        // no need to compute quaternions if there is motion data from metadata, which has priority
+        if !self.has_motion_from_metadata() {
+            self.integrate();
+        }
+    }
+
+    /// Get the primary IMU data source for debugging/logging purposes
+    pub fn get_motion_data_source(&self) -> MotionDataSource {
+        if !self.transformed_imu.is_empty() {
+            MotionDataSource::TransformedRawImu
+        } else {
+            let file_metadata = self.file_metadata.read();
+            if !file_metadata.raw_imu.is_empty() {
+                MotionDataSource::FileMetadataRawImu
+            } else if !self.estimated_gyro.is_empty() {
+                MotionDataSource::EstimatedGyro
+            } else {
+                MotionDataSource::None
+            }
+        }
+    }
+
+    /// Returns IMU data in priority order:
+    /// 1. Processed/transformed IMU data (if available)
+    /// 2. Raw IMU data from file metadata (if available)  
+    /// 3. Estimated gyro data (if available)
+    /// 4. Empty vector (if no data available)
+    pub fn get_motion_data(&self) -> Vec<TimeIMU> {
+        if !self.transformed_imu.is_empty() {
+            return self.transformed_imu.clone();
+        }
+        let file_metadata = self.file_metadata.read();
+        if !file_metadata.raw_imu.is_empty() {
+            return file_metadata.raw_imu.clone();
+        }
+        // If no IMU data from file metadata, use estimated gyro data
+        if !self.estimated_gyro.is_empty() {
+            return self.estimated_gyro.values().cloned().collect();
+        }
+        Vec::new()
     }
 
     pub fn set_offset(&mut self, timestamp_us: i64, offset_ms: f64) {
@@ -720,12 +794,48 @@ impl GyroSource {
         self.offsets_adjusted = self.offsets.iter().map(|(k, v)| (*k + (*v * 1000.0).round() as i64, *v)).collect::<BTreeMap<i64, f64>>();
     }
 
+    /// Processes raw gyroscope, accelerometer, and magnetometer data by applying user-defined
+    /// calibration corrections and noise filtering.
+    ///
+    /// Transformations applied:
+    /// 1. **Bias Correction**: Adds constant offsets to compensate for sensor drift
+    /// 2. **Orientation Mapping**: Remaps sensor axes to match camera coordinate system  
+    /// 3. **Rotation Correction**: Applies pitch/roll/yaw rotations to align sensor data
+    /// 4. **Low-pass Filtering**: Removes high-frequency noise (if `imu_lpf > 0`)
+    /// 5. **Median Filtering**: Removes spikes and outliers (if `imu_mf > 0`)
+    ///
+    /// Process:
+    /// 1. Checks if transforms are configured (`imu_transforms.has_any()`)
+    /// 2. Loads raw IMU data from file metadata
+    /// 3. Applies transformations to each IMU data point:
+    /// 4. Applies temporal filtering if configured
+    /// 5. Updates `transformed_imu` with processed data
+    /// 6. Calls `integrate()` to generate quaternions and smoothed data
+    ///
+    /// Usage example:
+    /// ```rust
+    /// gyro_source.imu_transforms.gyro_bias = Some([0.1, -0.05, 0.02]);
+    /// gyro_source.imu_transforms.imu_orientation = Some("YZX".to_string());
+    /// gyro_source.imu_transforms.imu_lpf = 20.0; // 20Hz low-pass filter
+    /// ...
+    /// gyro_source.apply_transforms();
+    /// ```
+    ///
+    /// Side effects:
+    /// - Updates `self.transformed_imu` with transformed data
+    /// - Clears `self.transformed_imu` if no transforms are configured
+    /// - Calls `self.integrate()`, which updates:
+    ///   - `self.quaternions` with integrated quaternion data
+    ///   - Applies additional quaternion filtering if configured
+    ///   - Applies quaternion rotation transforms if configured
     pub fn apply_transforms(&mut self) {
         let file_metadata = self.file_metadata.read();
 
         if self.imu_transforms.has_any() {
-            self.raw_imu = file_metadata.raw_imu.clone();
-            for x in self.raw_imu.iter_mut() {
+            self.transformed_imu = file_metadata.raw_imu.clone();
+
+            // Apply transforms (gyro_bias, imu_orientation, imu_rotation, acc_rotation)
+            for x in self.transformed_imu.iter_mut() {
                 if let Some(g) = x.gyro.as_mut() {
                     self.imu_transforms.transform(g, false);
                 }
@@ -736,18 +846,22 @@ impl GyroSource {
                     self.imu_transforms.transform(m, false);
                 }
             }
-            if self.imu_transforms.imu_lpf > 0.0 && !file_metadata.raw_imu.is_empty() && self.duration_ms > 0.0 {
-                let sample_rate = file_metadata.raw_imu.len() as f64 / (self.duration_ms / 1000.0);
-                if let Err(e) = super::filtering::Lowpass::filter_gyro_forward_backward(self.imu_transforms.imu_lpf, sample_rate, &mut self.raw_imu) {
-                    log::error!("Filter error {:?}", e);
+
+            // Apply filters if needed (imu_lpf, imu_mf)
+            if !self.transformed_imu.is_empty() && self.duration_ms > 0.0 {
+                let sample_rate = self.transformed_imu.len() as f64 / (self.duration_ms / 1000.0);
+                
+                if self.imu_transforms.imu_lpf > 0.0 {
+                    if let Err(e) = super::filtering::Lowpass::filter_gyro_forward_backward(self.imu_transforms.imu_lpf, sample_rate, &mut self.transformed_imu) {
+                        log::error!("Filter error {:?}", e);
+                    }
+                }
+                if self.imu_transforms.imu_mf > 0 {
+                    super::filtering::Median::filter_gyro_forward_backward(self.imu_transforms.imu_mf, sample_rate, &mut self.transformed_imu);
                 }
             }
-            if self.imu_transforms.imu_mf > 0 && !file_metadata.raw_imu.is_empty() && self.duration_ms > 0.0 {
-                let sample_rate = file_metadata.raw_imu.len() as f64 / (self.duration_ms / 1000.0);
-                super::filtering::Median::filter_gyro_forward_backward(self.imu_transforms.imu_mf, sample_rate, &mut self.raw_imu);
-            }
         } else {
-            self.raw_imu.clear();
+            self.transformed_imu.clear();
         }
 
         drop(file_metadata);
@@ -780,7 +894,15 @@ impl GyroSource {
     }
 
     pub fn      org_quat_at_timestamp(&self, timestamp_ms: f64) -> Quat64 { self.quat_at_timestamp(&self.quaternions,          timestamp_ms) }
+    /// Returns the "smoothing quaternion" at the given timestamp, in milliseconds.
+    /// Note: This is not the actual smoothed orientation, unlike `actual_smoothed_quat_at_timestamp`.
+    /// TODO: Consider renaming this method to `smoothing_quat_at_timestamp` for clarity.
     pub fn smoothed_quat_at_timestamp(&self, timestamp_ms: f64) -> Quat64 { self.quat_at_timestamp(&self.smoothed_quaternions, timestamp_ms) }
+    pub fn actual_smoothed_quat_at_timestamp(&self, timestamp_ms: f64) -> Quat64 {
+        let quat_orig = self.quat_at_timestamp(&self.quaternions, timestamp_ms);
+        let quat_smoothing = self.quat_at_timestamp(&self.smoothed_quaternions, timestamp_ms);
+        (quat_smoothing / quat_orig).inverse()
+    }
 
     pub fn offset_at_timestamp(offsets: &BTreeMap<i64, f64>, timestamp_ms: f64) -> f64 {
         match offsets.len() {
@@ -824,8 +946,9 @@ impl GyroSource {
         hasher.write_u64(self.duration_ms.to_bits());
         hasher.write_u64(self.imu_transforms.imu_lpf.to_bits());
         hasher.write_i32(self.imu_transforms.imu_mf);
-        hasher.write_usize(self.raw_imu.len());
+        hasher.write_usize(self.transformed_imu.len());
         hasher.write_usize(file_metadata.raw_imu.len());
+        hasher.write_usize(self.estimated_gyro.len());
         hasher.write_usize(self.quaternions.len());
         hasher.write_usize(file_metadata.quaternions.len());
         hasher.write_usize(file_metadata.image_orientations.as_ref().map(|v| v.len()).unwrap_or_default());
@@ -875,15 +998,12 @@ impl GyroSource {
         }
     }
 
-    pub fn find_bias(&self, timestamp_start: f64, timestamp_stop: f64) -> (f64, f64, f64) {
-        let ts_start = timestamp_start - self.offset_at_video_timestamp(timestamp_start);
-        let ts_stop = timestamp_stop - self.offset_at_video_timestamp(timestamp_stop);
+    /// Helper function to process gyro data for bias calculation
+    fn process_gyro_bias<'a>(imu_data: impl Iterator<Item = &'a TimeIMU>, ts_start: f64, ts_stop: f64) -> ([f64; 3], usize) {
         let mut bias_vals = [0.0, 0.0, 0.0];
         let mut n = 0;
 
-        let file_metadata = self.file_metadata.read();
-
-        for x in &file_metadata.raw_imu {
+        for x in imu_data {
             if let Some(g) = x.gyro {
                 if x.timestamp_ms > ts_start && x.timestamp_ms < ts_stop {
                     bias_vals[0] -= g[0];
@@ -893,10 +1013,29 @@ impl GyroSource {
                 }
             }
         }
-        for b in bias_vals.iter_mut() {
+
+        (bias_vals, n)
+    }
+
+    pub fn find_bias(&self, timestamp_start: f64, timestamp_stop: f64) -> (f64, f64, f64) {
+        let ts_start = timestamp_start - self.offset_at_video_timestamp(timestamp_start);
+        let ts_stop = timestamp_stop - self.offset_at_video_timestamp(timestamp_stop);
+
+        let file_metadata = self.file_metadata.read();
+
+        // Process the appropriate data source without any cloning
+        let (bias_vals, n) = if !file_metadata.raw_imu.is_empty() {
+            Self::process_gyro_bias(file_metadata.raw_imu.iter(), ts_start, ts_stop)
+        } else {
+            Self::process_gyro_bias(self.estimated_gyro.values(), ts_start, ts_stop)
+        };
+
+        // Normalize the bias values
+        let mut normalized_bias = bias_vals;
+        for b in normalized_bias.iter_mut() {
             *b /= n.max(1) as f64;
         }
 
-        (bias_vals[0], bias_vals[1], bias_vals[2])
+        (normalized_bias[0], normalized_bias[1], normalized_bias[2])
     }
 }

@@ -67,7 +67,7 @@ install-deps:
         echo "Installing OpenCV from vcpkg"
         # Install OpenCV
         ./vcpkg/vcpkg install "flatbuffers:arm64-ios" --cmake-args=-DVCPKG_BUILD_TYPE=release
-        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics]:arm64-ios" --cmake-args=-DVCPKG_BUILD_TYPE=release
+        ./vcpkg/vcpkg install "opencv4[core,calib3d,thread,intrinsics,png]:arm64-ios" --cmake-args=-DVCPKG_BUILD_TYPE=release
         rm -rf ./vcpkg/buildtrees
         rm -rf ./vcpkg/downloads
     fi
@@ -118,7 +118,7 @@ build-and-package profile is_dist:
     export PATH="{{ProjectDir}}/ext/{{QtVersionIOS}}/ios/bin:/usr/libexec/:$PATH"
     export QMAKE="{{ProjectDir}}/ext/{{QtVersionIOS}}/ios/bin/qmake"
 
-    export OPENCV_LINK_LIBS="opencv_core4,opencv_calib3d4,opencv_features2d4,opencv_imgproc4,opencv_video4,opencv_flann4,opencv_stitching4"
+    export OPENCV_LINK_LIBS="opencv_core4,opencv_calib3d4,opencv_features2d4,opencv_imgproc4,opencv_video4,opencv_flann4,opencv_stitching4,opencv_imgcodecs4,png"
     export OPENCV_LINK_PATHS={{ProjectDir}}/ext/vcpkg/installed/arm64-ios/lib
     export OPENCV_INCLUDE_PATHS={{ProjectDir}}/ext/vcpkg/installed/arm64-ios/include/opencv4/
 

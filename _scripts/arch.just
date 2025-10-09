@@ -1,6 +1,6 @@
 import 'common.just'
 
-AptGetExists := `which apt-get > /dev/null && echo true || echo false`
+PacmanExists := `which pacman > /dev/null && echo true || echo false`
 QtLinuxArch      := if Arch == "aarch64" { "linux_arm64" } else { "linux" }
 FFmpegLinuxArch  := if Arch == "aarch64" { "arm64"       } else { "amd64" }
 ArchName         := if Arch == "aarch64" { "arm64"       } else { "x86_64" }
@@ -15,14 +15,40 @@ install-deps:
     #!/bin/bash
     set -e
 
-    echo "Installing dependencies $LIBCLANG_PATH {{AptGetExists}}"
-    if [ "{{AptGetExists}}" == "true" ]; then
-        sudo apt-get install -y p7zip-full python3-pip python3-venv clang libclang-dev bison pkg-config gperf curl unzip zip git
-        sudo apt-get install -y libc++-dev libva-dev libvdpau-dev libvdpau1 mesa-va-drivers ocl-icd-opencl-dev opencl-headers
-        sudo apt-get install -y libpulse-dev libasound-dev libxkbcommon-dev
-        sudo apt-get install -y libfontconfig1 libfreetype6
-        sudo apt-get install -y libstdc++-12-dev || true
-        sudo apt-get install -y libstdc++-8-dev || true
+    echo "Installing dependencies for Arch Linux"
+    if [ "{{PacmanExists}}" == "true" ]; then
+        # Update package database
+        sudo pacman -Sy
+        
+        # Install base development tools
+        sudo pacman -S --needed --noconfirm base-devel git curl wget unzip zip p7zip python python-pip clang llvm bison pkg-config gperf
+        
+        # Install multimedia and graphics libraries
+        sudo pacman -S --needed --noconfirm libva libvdpau mesa ocl-icd opencl-headers
+        
+        # Install audio libraries
+        sudo pacman -S --needed --noconfirm libpulse alsa-lib
+        
+        # Install X11 and Wayland libraries
+        sudo pacman -S --needed --noconfirm libxkbcommon libx11 libxext libxrandr libxi libxcursor libxdamage libxinerama libxxf86vm
+        
+        # Install font and graphics libraries
+        sudo pacman -S --needed --noconfirm fontconfig freetype2
+        
+        # Install image processing libraries
+        sudo pacman -S --needed --noconfirm libpng libjpeg-turbo libtiff libwebp
+        
+        # Install C++ standard library (required for FFmpeg)
+        sudo pacman -S --needed --noconfirm libc++
+        
+        # Install EGL and OpenGL libraries (required for GPU acceleration)
+        sudo pacman -S --needed --noconfirm libgl libglvnd mesa
+        
+        # Install system libraries
+        sudo pacman -S --needed --noconfirm dbus systemd
+        
+        # Install additional dependencies for OpenCV
+        sudo pacman -S --needed --noconfirm cmake ninja autoconf libtool glfw-x11 mesa-libgl libxrandr libxi libxcursor libxdamage libxinerama libxxf86vm
     fi
 
     mkdir -p {{ExtDir}}
@@ -30,8 +56,11 @@ install-deps:
     if [ ! -f "{{OpenCVPath}}/lib/libopencv_core4.a" ]; then
         echo "Installing OpenCV from vcpkg"
         # OpenCV dependencies
-        if [ "{{AptGetExists}}" == "true" ]; then
-            sudo apt-get install -y libx11-dev libxft-dev libxext-dev autoconf libtool libglfw3 libgles2-mesa-dev libxrandr-dev libxi-dev libxcursor-dev libxdamage-dev libxinerama-dev libxxf86vm-dev libdbus-1-dev libxtst-dev libdbus-1-dev libxi-dev libxtst-dev libsystemd-dev cmake ninja-build
+        if [ "{{PacmanExists}}" == "true" ]; then
+        # Additional dependencies for vcpkg/OpenCV
+        sudo pacman -S --needed --noconfirm libx11 libxft libxext autoconf libtool glfw-x11 mesa-libgl libxrandr libxi libxcursor libxdamage libxinerama libxxf86vm dbus libxtst systemd cmake ninja
+        # Install PNG and image library development packages for vcpkg
+        sudo pacman -S --needed --noconfirm libpng libjpeg-turbo libtiff libwebp
         fi
 
         # Install vcpkg
@@ -42,7 +71,16 @@ install-deps:
 
         {{ExtDir}}/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
+        # Set up vcpkg environment
+        export VCPKG_ROOT={{ExtDir}}/vcpkg
+        export VCPKG_DEFAULT_TRIPLET={{VcpkgArch}}
+
+        # Install PNG library first
+        echo "Installing PNG library via vcpkg..."
+        {{ExtDir}}/vcpkg/vcpkg install "libpng:{{VcpkgArch}}" --cmake-args=-DVCPKG_BUILD_TYPE=release
+
         # Install OpenCV
+        echo "Installing OpenCV via vcpkg..."
         {{ExtDir}}/vcpkg/vcpkg install "flatbuffers:{{VcpkgArch}}" --cmake-args=-DVCPKG_BUILD_TYPE=release
         {{ExtDir}}/vcpkg/vcpkg install "opencv4[core,calib3d,opencl,thread,intrinsics,png]:{{VcpkgArch}}" --cmake-args=-DVCPKG_BUILD_TYPE=release
         rm -rf {{ExtDir}}/vcpkg/buildtrees
@@ -50,8 +88,9 @@ install-deps:
     fi
 
     if [[ ! -d "${LIBCLANG_PATH}" ]]; then
-        if [ "{{AptGetExists}}" == "true" ]; then
-            sudo apt-get install -y libclang-13-dev
+        if [ "{{PacmanExists}}" == "true" ]; then
+            # Arch Linux uses llvm package which includes libclang
+            sudo pacman -S --needed --noconfirm llvm
         fi
     fi
 
@@ -68,37 +107,26 @@ install-deps:
         pip3 install -U aqtinstall
         python3 -m aqt install-qt {{QtLinuxArch}} desktop {{QtVersion}}
 
-        # For VMware: sudo apt install libpocl2
+        # For VMware: sudo pacman -S pocl
     fi
 
     if [ "$IN_DOCKER" == "1" ]; then
         echo "Installing AppImage builder"
 
-        sudo apt-get install -y debian-keyring debian-archive-keyring
-        sudo apt-key adv --refresh-keys --keyserver keyserver.ubuntu.com
-        sudo apt-get install -y python3-setuptools patchelf desktop-file-utils libgdk-pixbuf2.0-dev fakeroot strace fuse gtk-update-icon-cache zsync
-        export HOST_ARCH=`lscpu | grep Architecture | awk {'print $2'}`
-        sudo curl -L https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${HOST_ARCH}.AppImage -o /usr/local/bin/appimagetool
+        # Install AppImage dependencies
+        sudo pacman -S --needed --noconfirm python-setuptools patchelf desktop-file-utils gdk-pixbuf2 fakeroot strace fuse2 gtk-update-icon-cache zsync
+        
+        # Install squashfs-tools
+        sudo pacman -S --needed --noconfirm squashfs-tools
 
+        # Install appimagetool
+        export HOST_ARCH=`uname -m`
+        sudo curl -L https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${HOST_ARCH}.AppImage -o /usr/local/bin/appimagetool
         sudo chmod +x /usr/local/bin/appimagetool
 
-        # Compile squashfs-tools
-        #if [[ ! -d "{{ExtDir}}/squashfs-tools-squashfs-tools-4.6.1/squashfs-tools" ]]; then
-            sudo apt-get install -y unzip wget liblzma-dev zlib1g-dev
-            rm -f squashfs-tools-4.6.1.zip || true
-            rm -rf squashfs-tools* || true
-            wget https://github.com/plougher/squashfs-tools/archive/refs/tags/squashfs-tools-4.6.1.zip
-            unzip squashfs-tools-4.6.1.zip
-            pushd squashfs-tools-squashfs-tools-4.6.1/squashfs-tools
-                sed -i 's/#XZ_SUPPORT/XZ_SUPPORT/' Makefile
-                make
-                sudo make install
-            popd
-        #fi
-
-        # Compile python 3.8
+        # Compile python 3.8 (if needed for appimage-builder)
         if [[ ! -d "{{ExtDir}}/python3.8" ]]; then
-            sudo apt-get install -y build-essential libreadline-gplv2-dev libncursesw5-dev libssl-dev libsqlite3-dev tk-dev libgdbm-dev libc6-dev libbz2-dev libffi-dev zlib1g-dev wget
+            sudo pacman -S --needed --noconfirm base-devel libreadline zlib openssl sqlite tk libgdbm libc6-dev libbz2 libffi wget
             wget https://www.python.org/ftp/python/3.8.6/Python-3.8.6.tgz
             tar xzf Python-3.8.6.tgz
             pushd Python-3.8.6
@@ -126,8 +154,8 @@ install-deps:
 
     popd
 
-    if [ "{{AptGetExists}}" == "false" ]; then
-        echo "Warning: apt-get not found, so build dependencies could not be automatically installed."
+    if [ "{{PacmanExists}}" == "false" ]; then
+        echo "Warning: pacman not found, so build dependencies could not be automatically installed."
         echo "  Make sure you have installed all required build dependencies using your system's package manager."
     fi
 
@@ -147,6 +175,19 @@ test *param:
 debug *param:
     cargo run -- {{param}}
 
+[no-cd]
+build *param:
+    cargo build --release -- {{param}}
+
+[no-cd]
+build-debug *param:
+    cargo build -- {{param}}
+
+[no-cd]
+clean:
+    cargo clean
+    rm -rf target/
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Deployment ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -165,11 +206,10 @@ deploy *param:
     echo "Cargo target dir: $CARGO_TARGET"
 
     if [ "{{param}}" == "docker" ]; then
-        sudo docker run -v $PROJECT_DIR:$PROJECT_DIR -v $HOME/.cargo:/root/.cargo debian/eol:buster bash -c "
+        sudo docker run -v $PROJECT_DIR:$PROJECT_DIR -v $HOME/.cargo:/root/.cargo archlinux:latest bash -c "
             set -e
-            apt update
-            echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
-            apt install -y sudo dialog apt-utils curl clang
+            pacman -Sy
+            pacman -S --needed --noconfirm sudo curl clang base-devel git
             export RUNLEVEL=1
             export GITHUB_RUN_NUMBER=$GITHUB_RUN_NUMBER
             export VULKAN_SDK=$VULKAN_SDK
@@ -178,10 +218,10 @@ deploy *param:
             curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
             source \$HOME/.cargo/env
             cargo install --force just
-            if [ "$FORCE_ARCH" == "aarch64" ]; then
+            if [ \"$FORCE_ARCH\" == \"aarch64\" ]; then
                 export FORCE_ARCH=aarch64
                 rustup target add aarch64-unknown-linux-gnu
-                apt install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+                pacman -S --needed --noconfirm gcc-aarch64-linux-gnu
             fi
             cd $PROJECT_DIR
             just install-deps
@@ -368,13 +408,13 @@ deploy *param:
 
     cp -rf $TARGET/* $APP_DIR/
     if [ "{{Arch}}" == "aarch64" ]; then
-        cp $PROJECT_DIR/_deployment/linux/AppImageBuilder.yml AppImageBuilder-arm64.yml
+        cp $PROJECT_DIR/_deployment/arch/AppImageBuilder.yml AppImageBuilder-arm64.yml
         sed -i 's|x86_64|aarch64|' AppImageBuilder-arm64.yml
         sed -i 's|amd64|aarch64|' AppImageBuilder-arm64.yml
         appimage-builder --recipe AppImageBuilder-arm64.yml
         rm AppImageBuilder-arm64.yml
     else
-        appimage-builder --recipe $PROJECT_DIR/_deployment/linux/AppImageBuilder.yml
+        appimage-builder --recipe $PROJECT_DIR/_deployment/arch/AppImageBuilder.yml
     fi
     chmod +x Gyroflow-${APP_VERSION}-{{ArchName}}.AppImage
 

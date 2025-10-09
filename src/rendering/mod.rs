@@ -881,6 +881,76 @@ pub fn get_encoder_options(name: &str) -> String {
     ret
 }
 
+// Shared helper: decode video frames and feed into AutosyncProcess
+pub fn run_autosync_with_video_file<E>(
+    sync: gyroflow_core::synchronization::AutosyncProcess,
+    input_file: &gyroflow_core::InputFile,
+    video_size: (usize, usize),
+    proc_height: i32,
+    gpu_decoding: bool,
+    cancel_flag: Arc<AtomicBool>,
+    err_callback: E,
+) -> Result<(), String>
+where
+    E: Fn((String, String)) + Send + Sync + Clone + 'static,
+{
+    use crate::rendering::VideoProcessor;
+
+    let mut decoder_options = ffmpeg_next::Dictionary::new();
+    if input_file.image_sequence_fps > 0.0 {
+        let fps = fps_to_rational(input_file.image_sequence_fps);
+        decoder_options.set("framerate", &format!("{}/{}", fps.numerator(), fps.denominator()));
+    }
+    if input_file.image_sequence_start > 0 {
+        decoder_options.set("start_number", &format!("{}", input_file.image_sequence_start));
+    }
+    if proc_height > 0 {
+        decoder_options.set("scale", &format!("{}x{}", (proc_height * 16) / 9, proc_height));
+    }
+    if cfg!(target_os = "android") {
+        decoder_options.set("ndk_codec", "1");
+    }
+
+    let (target_w, target_h) = if proc_height > 0 {
+        ((proc_height as f64 * (video_size.0 as f64 / video_size.1 as f64)).round() as u32, proc_height as u32)
+    } else {
+        (video_size.0 as u32, video_size.1 as u32)
+    };
+
+    let fs_base = gyroflow_core::filesystem::get_engine_base();
+    let mut proc = VideoProcessor::from_file(&fs_base, &input_file.url, gpu_decoding, 0, Some(decoder_options))
+        .map_err(|e| e.to_string())?;
+
+    let ranges = sync.get_ranges();
+    let err2 = err_callback.clone();
+    let sync = Arc::new(sync);
+    let sync2 = sync.clone();
+    let mut frame_no: usize = 0;
+
+    proc.on_frame(move |timestamp_us, input_frame, _output_frame, converter, _rate_control| {
+        match converter.scale(input_frame, ffmpeg_next::format::Pixel::GRAY8, target_w, target_h) {
+            Ok(small_frame) => {
+                let (w, h, stride, pixels) = (
+                    small_frame.plane_width(0),
+                    small_frame.plane_height(0),
+                    small_frame.stride(0),
+                    small_frame.data(0)
+                );
+                sync2.feed_frame(timestamp_us, frame_no, w, h, stride, pixels);
+                frame_no += 1;
+            },
+            Err(e) => err2(("An error occured: %1".to_string(), e.to_string())),
+        }
+        Ok(())
+    });
+
+    proc.start_decoder_only(ranges, cancel_flag)
+        .map_err(|e| e.to_string())?;
+
+    sync.finished_feeding_frames();
+    Ok(())
+}
+
 /*
 pub fn test() {
     log::debug!("FfmpegProcessor::supported_gpu_backends: {:?}", ffmpeg_hw::supported_gpu_backends());

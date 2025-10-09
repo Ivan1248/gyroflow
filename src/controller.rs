@@ -19,6 +19,7 @@ use crate::core::calibration::LensCalibrator;
 use crate::core::synchronization::AutosyncProcess;
 use crate::core::stabilization::KernelParamsFlags;
 use crate::core::synchronization;
+use crate::core::gps::source::GPSSyncMode;
 use crate::core::keyframes::*;
 use crate::core::filesystem;
 use crate::rendering;
@@ -60,6 +61,7 @@ pub struct Controller {
 
     set_of_method: qt_method!(fn(&self, v: u32)),
     start_autosync: qt_method!(fn(&mut self, timestamps_fract: String, sync_params: String, mode: String)),
+    estimate_motion_from_video: qt_method!(fn(&mut self, sync_params: String)),
     update_chart: qt_method!(fn(&self, chart: QJSValue, series: String) -> bool),
     update_frequency_graph: qt_method!(fn(&self, graph: QJSValue, idx: usize, ts: f64, sr: f64, fft_size: usize)),
     update_keyframes_view: qt_method!(fn(&self, kfview: QJSValue)),
@@ -78,6 +80,11 @@ pub struct Controller {
     get_smoothing_max_angles: qt_method!(fn(&self) -> QJsonArray),
     get_smoothing_status: qt_method!(fn(&self) -> QJsonArray),
     set_smoothing_param: qt_method!(fn(&self, name: QString, val: f64)),
+
+    set_motion_direction_alignment: qt_method!(fn(&self, enabled: bool)),
+    set_motion_direction_param: qt_method!(fn(&self, name: QString, val: f64)),
+    load_motion_direction_params: qt_method!(fn(&self, params_json: QString)),
+    get_motion_direction_status: qt_method!(fn(&self) -> QJsonArray),
     set_horizon_lock: qt_method!(fn(&self, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64)),
     set_use_gravity_vectors: qt_method!(fn(&self, v: bool)),
     set_horizon_lock_integration_method: qt_method!(fn(&self, v: i32)),
@@ -121,6 +128,8 @@ pub struct Controller {
     stab_enabled: qt_property!(bool; WRITE set_stab_enabled),
     show_detected_features: qt_property!(bool; WRITE set_show_detected_features),
     show_optical_flow: qt_property!(bool; WRITE set_show_optical_flow),
+    show_motion_direction: qt_property!(bool; WRITE set_show_motion_direction),
+    show_spherical_grid: qt_property!(bool; WRITE set_show_spherical_grid),
     fov: qt_property!(f64; WRITE set_fov),
     fov_overview: qt_property!(bool; WRITE set_fov_overview),
     show_safe_area: qt_property!(bool; WRITE set_show_safe_area),
@@ -200,6 +209,7 @@ pub struct Controller {
     mesh_at_frame: qt_method!(fn(&self, frame: usize) -> QVariantList),
     get_scaling_ratio: qt_method!(fn(&self) -> f64),
     get_min_fov: qt_method!(fn(&self) -> f64),
+    get_fov_angles_deg: qt_method!(fn(&self) -> QJsonArray),
 
     init_calibrator: qt_method!(fn(&mut self)),
 
@@ -298,8 +308,26 @@ pub struct Controller {
     preview_pipeline: Arc<AtomicUsize>,
 
     ongoing_computations: BTreeSet<u64>,
-
+    
     pub stabilizer: Arc<StabilizationManager>,
+    
+    has_motion_directions: qt_method!(fn(&self) -> bool),
+
+    load_gpx: qt_method!(fn(&self, url: QUrl)),
+    export_synchronized_gpx: qt_method!(fn(&self, url: QUrl)),
+    get_gpx_summary: qt_method!(fn(&self) -> QJsonObject),
+    gps_sync_mode: qt_property!(i32; READ get_gps_sync_mode WRITE set_gps_sync_mode NOTIFY gps_changed),
+    gps_offset_ms: qt_property!(f64; READ get_gps_offset_ms WRITE set_gps_offset_ms NOTIFY gps_changed),
+    gps_use_processed_motion: qt_property!(bool; READ get_gps_use_processed_motion WRITE set_gps_use_processed_motion NOTIFY gps_changed),
+    gps_speed_threshold: qt_property!(f64; READ get_gps_speed_threshold WRITE set_gps_speed_threshold NOTIFY gps_changed),
+    gps_max_time_offset: qt_property!(f64; READ get_gps_max_time_offset WRITE set_gps_max_time_offset NOTIFY gps_changed),
+    has_gps: qt_property!(bool; READ has_gps NOTIFY chart_data_changed),
+    get_gps_sync_quality: qt_method!(fn(&self) -> f64),
+    get_gps_anchor: qt_method!(fn(&self) -> QString),
+    get_gps_overlap: qt_method!(fn(&self) -> f64),
+    get_gps_polyline: qt_method!(fn(&self, max_points: usize) -> QJsonArray),
+    get_gps_current_xy: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
+    gps_changed: qt_signal!(),
 }
 
 impl Controller {
@@ -328,6 +356,7 @@ impl Controller {
         self.chart_data_changed();
         self.keyframes_changed();
         self.update_offset_model();
+        self.gps_changed();  // Update GPS settings in GUI after clearing
 
         *self.stabilizer.input_file.write() = gyroflow_core::InputFile {
             url: url.clone(),
@@ -380,6 +409,12 @@ impl Controller {
         QString::from(self.stabilizer.input_file.read().project_file_url.as_ref().cloned().unwrap_or_default())
     }
 
+    fn estimate_motion_from_video(&mut self, sync_params: String) {
+        // Use empty timestamps_fract to trigger whole-video analysis
+        self.start_autosync("[]".into(), sync_params, "estimate_motion_from_video".into());
+    }
+
+    // Overlaps with RenderQueue::do_autosync, TODO: refactor
     fn start_autosync(&mut self, timestamps_fract: String, sync_params: String, mode: String) {
         rendering::clear_log();
 
@@ -397,8 +432,6 @@ impl Controller {
         sync_params.every_nth_frame     = sync_params.every_nth_frame.max(1);
 
         let for_rs = mode == "estimate_rolling_shutter";
-
-        let every_nth_frame = sync_params.every_nth_frame;
 
         self.sync_in_progress = true;
         self.sync_in_progress_changed();
@@ -440,12 +473,17 @@ impl Controller {
                 this.stabilizer.keyframes.write().update_gyro(&gyro);
                 this.stabilizer.invalidate_zooming();
             }
+            this.sync_in_progress = false;
+            this.sync_in_progress_changed();
             this.update_offset_model();
             this.request_recompute();
         });
         let set_orientation = util::qt_queued_callback_mut(self, move |this, orientation: String| {
             ::log::info!("Setting orientation {}", &orientation);
             this.orientation_guessed(QString::from(orientation));
+        });
+        let request_recompute = util::qt_queued_callback_mut(self, move |this, _: ()| {
+            this.request_recompute();
         });
         let err = util::qt_queued_callback_mut(self, |this, (msg, mut arg): (String, String)| {
             arg.push_str("\n\n");
@@ -474,68 +512,17 @@ impl Controller {
                 };
             });
 
-            let ranges = sync.get_ranges();
             let cancel_flag = self.cancel_flag.clone();
 
             let input_file = self.stabilizer.input_file.read().clone();
+            let video_size = self.stabilizer.params.read().size;
             let proc_height = self.processing_resolution;
             let gpu_decoding = self.stabilizer.gpu_decoding.load(SeqCst);
             core::run_threaded(move || {
-                let mut frame_no = 0;
-                let mut abs_frame_no = 0;
-
-                let mut decoder_options = ffmpeg_next::Dictionary::new();
-                if input_file.image_sequence_fps > 0.0 {
-                    let fps = rendering::fps_to_rational(input_file.image_sequence_fps);
-                    decoder_options.set("framerate", &format!("{}/{}", fps.numerator(), fps.denominator()));
+                if let Err(e) = crate::rendering::run_autosync_with_video_file(sync, &input_file, video_size, proc_height, gpu_decoding, cancel_flag, err.clone()) {
+                    err(("An error occured: %1".to_string(), e));
                 }
-                if input_file.image_sequence_start > 0 {
-                    decoder_options.set("start_number", &format!("{}", input_file.image_sequence_start));
-                }
-                if proc_height > 0 {
-                    decoder_options.set("scale", &format!("{}x{}", (proc_height * 16) / 9, proc_height));
-                }
-                ::log::debug!("Decoder options: {:?}", decoder_options);
-
-                let sync = std::rc::Rc::new(sync);
-
-                let fs_base = gyroflow_core::filesystem::get_engine_base();
-                match VideoProcessor::from_file(&fs_base, &input_file.url, gpu_decoding, 0, Some(decoder_options)) {
-                    Ok(mut proc) => {
-                        let err2 = err.clone();
-                        let sync2 = sync.clone();
-                        proc.on_frame(move |timestamp_us, input_frame, _output_frame, converter, _rate_control| {
-                            assert!(_output_frame.is_none());
-
-                            if abs_frame_no % every_nth_frame == 0 {
-                                let h = if proc_height > 0 { proc_height as u32 } else { input_frame.height() };
-                                let ratio = input_frame.height() as f64 / h as f64;
-                                let sw = (input_frame.width() as f64 / ratio).round() as u32;
-                                let sh = (input_frame.height() as f64 / (input_frame.width() as f64 / sw as f64)).round() as u32;
-                                match converter.scale(input_frame, ffmpeg_next::format::Pixel::GRAY8, sw, sh) {
-                                    Ok(small_frame) => {
-                                        let (width, height, stride, pixels) = (small_frame.plane_width(0), small_frame.plane_height(0), small_frame.stride(0), small_frame.data(0));
-
-                                        sync2.feed_frame(timestamp_us, frame_no, width, height, stride, pixels);
-                                    },
-                                    Err(e) => {
-                                        err2(("An error occured: %1".to_string(), e.to_string()))
-                                    }
-                                }
-                                frame_no += 1;
-                            }
-                            abs_frame_no += 1;
-                            Ok(())
-                        });
-                        if let Err(e) = proc.start_decoder_only(ranges, cancel_flag.clone()) {
-                            err(("An error occured: %1".to_string(), e.to_string()));
-                        }
-                        sync.finished_feeding_frames();
-                    }
-                    Err(error) => {
-                        err(("An error occured: %1".to_string(), error.to_string()));
-                    }
-                };
+                request_recompute(());
             });
         } else {
             err(("An error occured: %1".to_string(), "Invalid parameters".to_string()));
@@ -578,7 +565,7 @@ impl Controller {
                self.stabilizer.pose_estimator.estimated_quats.is_locked() ||
                self.stabilizer.gyro.is_locked() ||
                self.stabilizer.params.is_locked() {
-                ::log::debug!("Chart mutex locked, retrying");
+                ::log::debug!("Chart mutex locked, retrying");  // retrying in chartUpdateTimer
                 return false;
             }
 
@@ -594,7 +581,11 @@ impl Controller {
             if let Some(gyro) = self.stabilizer.gyro.try_read() {
                 if let Some(params) = self.stabilizer.params.try_read() {
                     if let Some(keyframes) = self.stabilizer.keyframes.try_read() {
-                        chart.setFromGyroSource(&gyro, &params, &keyframes, &series);
+                        let gps_track = self.stabilizer.get_gps_track();
+                        let gps_offset_ms = self.stabilizer.get_gps_offset_ms();
+                        let gps_use_processed_motion = self.stabilizer.get_gps_use_processed_motion();
+                        let gps_speed_threshold = self.stabilizer.get_gps_speed_threshold();
+                        chart.setFromGyroSource(&gyro, &params, &keyframes, gps_track, gps_offset_ms, gps_use_processed_motion, gps_speed_threshold, &series);
                         return true;
                     }
                 }
@@ -608,8 +599,7 @@ impl Controller {
             let graph = unsafe { &mut *graph.as_ptr() }; // _self.borrow_mut();
 
             let gyro = &self.stabilizer.gyro.read();
-            let file_metadata = gyro.file_metadata.read();
-            let raw_imu = gyro.raw_imu(&file_metadata);
+            let raw_imu = gyro.get_motion_data();
 
             if !raw_imu.is_empty() {
                 let dt_ms = 1000.0 / sr;
@@ -742,6 +732,8 @@ impl Controller {
                 stab2.invalidate_ongoing_computations();
                 stab2.invalidate_smoothing();
                 this.request_recompute();
+                // Recompute GPS sync after new gyro data is loaded
+                this.recompute_gps_sync();
             });
             let load_lens = util::qt_queued_callback_mut(self, move |this, path: String| {
                 this.load_lens_profile(path.into());
@@ -1186,6 +1178,26 @@ impl Controller {
         self.chart_data_changed();
         self.request_recompute();
     }
+    fn set_motion_direction_alignment(&mut self, enabled: bool) {
+        self.stabilizer.set_motion_direction_alignment(enabled);
+        self.chart_data_changed();
+        self.request_recompute();
+    }
+    fn set_motion_direction_param(&mut self, name: QString, val: f64) {
+        self.stabilizer.set_motion_direction_param(&name.to_string(), val);
+        self.chart_data_changed();
+        self.request_recompute();
+    }
+    fn load_motion_direction_params(&mut self, params_json: QString) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&params_json.to_string()) {
+            self.stabilizer.load_motion_direction_params(&json);
+            self.chart_data_changed();
+            self.request_recompute();
+        }
+    }
+    fn get_motion_direction_status(&self) -> QJsonArray {
+        util::serde_json_to_qt_array(&self.stabilizer.get_motion_direction_status())
+    }
     wrap_simple_method!(set_horizon_lock, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_use_gravity_vectors, v: bool; recompute; chart_data_changed);
     wrap_simple_method!(set_horizon_lock_integration_method, v: i32; recompute; chart_data_changed);
@@ -1209,6 +1221,11 @@ impl Controller {
             this.ongoing_computations.remove(&id);
             let finished = this.ongoing_computations.is_empty();
             this.compute_progress(id, if finished { 1.0 } else { 0.0 });
+            
+            // Recompute GPS sync after smoothing computation is complete
+            if finished {
+                this.recompute_gps_sync();
+            }
         }));
         self.ongoing_computations.insert(id);
 
@@ -1401,6 +1418,8 @@ impl Controller {
     wrap_simple_method!(set_stab_enabled,           v: bool);
     wrap_simple_method!(set_show_detected_features, v: bool);
     wrap_simple_method!(set_show_optical_flow,      v: bool);
+    wrap_simple_method!(set_show_motion_direction,  v: bool);
+    wrap_simple_method!(set_show_spherical_grid,    v: bool);
     wrap_simple_method!(set_digital_lens_name,      v: String; recompute);
     wrap_simple_method!(set_digital_lens_param,     i: usize, v: f64; recompute);
     wrap_simple_method!(set_fov_overview,       v: bool; recompute);
@@ -1453,6 +1472,37 @@ impl Controller {
     fn get_min_fov           (&self) -> f64 { self.stabilizer.get_min_fov() }
     fn set_video_created_at  (&self, timestamp: u64) { self.stabilizer.params.write().video_created_at = if timestamp > 0 { Some(timestamp) } else { None }; }
 
+    fn get_fov_angles_deg(&self) -> QJsonArray {
+        let params = gyroflow_core::stabilization::ComputeParams::from_manager(&self.stabilizer);
+
+        // Get camera intrinsic matrix and lens data for the timestamp 0.0  // TODO: check if this is correct
+        let (camera_matrix, _distortion_coeffs, _radial_limit, _sx, _sy, _fl) =
+            gyroflow_core::stabilization::FrameTransform::get_lens_data_at_timestamp(&params, 0.0f64, false);
+
+        // Calculate effective FOV scale (similar to FrameTransform::get_fov but without keyframes)
+        let base_fov = params.fovs.get(0).copied().unwrap_or(1.0);
+        let fov = (base_fov * params.fov_scale).max(0.001) * (params.width as f64 / params.output_width as f64);
+        
+        // Apply horizontal stretch correction for anamorphic lenses
+        let horizontal_ratio = if params.lens.input_horizontal_stretch > 0.01 {
+            params.lens.input_horizontal_stretch
+        } else { 1.0 };
+        let img_dim_ratio = 1.0 / horizontal_ratio;
+
+        // Extract focal lengths from camera matrix and apply corrections
+        let fx0 = camera_matrix[(0, 0)];
+        let fy0 = camera_matrix[(1, 1)];
+        let fx = fx0 * img_dim_ratio / fov;
+        let fy = fy0 * img_dim_ratio / fov;
+
+        // Convert to degrees and calculate FOV angles using standard formula
+        let to_deg = 180.0f64 / std::f64::consts::PI;
+        let h_fov = 2.0 * (params.output_width as f64 / (2.0 * fx)).atan() * to_deg;
+        let v_fov = 2.0 * (params.output_height as f64 / (2.0 * fy)).atan() * to_deg;
+
+        crate::util::serde_json_to_qt_array(&serde_json::json!([h_fov, v_fov]))
+    }
+
     fn set_trim_ranges(&self, ranges: QString) {
         let ranges = ranges.to_string()
             .split(';')
@@ -1473,6 +1523,209 @@ impl Controller {
         let q = gyro.org_quat_at_timestamp(ts);
         QVariantList::from_iter(&[q.w, q.i, q.j, q.k, sq.w, sq.i, sq.j, sq.k]) // scalar first
     }
+
+    fn get_gps_polyline(&self, max_points: usize) -> QJsonArray {
+        use crate::util::serde_json_to_qt_array;
+
+        let track_opt = self.stabilizer.get_gps_track();
+        let Some(track) = track_opt.as_ref() else { return QJsonArray::default(); };
+        let n = track.len();
+        if n < 2 { return QJsonArray::default(); }
+
+        let max_points = max_points.max(2);
+
+        let lat0 = track.lat[0].to_radians();
+        let lon0 = track.lon[0].to_radians();
+        let r_earth = 6_371_000.0_f64;
+
+        let mut xs: Vec<f64> = Vec::with_capacity(n);
+        let mut ys: Vec<f64> = Vec::with_capacity(n);
+        for i in 0..n {
+            let lat = track.lat[i].to_radians();
+            let lon = track.lon[i].to_radians();
+            let dx = (lon - lon0) * lat0.cos() * r_earth;
+            let dy = (lat - lat0) * r_earth;
+            xs.push(dx);
+            ys.push(dy);
+        }
+        let (minx, maxx) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        let (miny, maxy) = ys.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        let cx = (minx + maxx) * 0.5;
+        let cy = (miny + maxy) * 0.5;
+        let max_range = (maxx - minx).abs().max((maxy - miny).abs()).max(1e-6);
+
+        // Downsample by step to limit payload
+        let step = (n as f64 / max_points as f64).ceil() as usize;
+        let mut out: Vec<[f64; 2]> = Vec::with_capacity((n + step - 1) / step);
+        let mut i = 0;
+        while i < n {
+            let x_norm = ((xs[i] - cx) / max_range) + 0.5;
+            let y_norm = ((cy - ys[i]) / max_range) + 0.5; // invert Y so north is up
+            out.push([x_norm, y_norm]);
+            i += step.max(1);
+        }
+        serde_json_to_qt_array(&serde_json::json!(out))
+    }
+
+    fn get_gps_current_xy(&self, timestamp_us: i64) -> QJsonArray {
+        use crate::util::serde_json_to_qt_array;
+
+        let track_opt = self.stabilizer.get_gps_track();
+        let Some(track) = track_opt.as_ref() else { return QJsonArray::default(); };
+        let n = track.len();
+        if n == 0 { return QJsonArray::default(); }
+
+        let t_ms = timestamp_us as f64 / 1000.0;
+        let off_ms = self.stabilizer.get_gps_offset_ms();
+        let t_s = (t_ms - off_ms) / 1000.0; // convert to GPSTrack time base (seconds)
+
+        // Binary search for interval
+        let mut lo = 0usize;
+        let mut hi = n - 1;
+        if t_s <= track.time[0] {
+            lo = 0; hi = 0;
+        } else if t_s >= track.time[n - 1] {
+            lo = n - 1; hi = n - 1;
+        } else {
+            while hi - lo > 1 { // invariant: track.time[lo] <= t_s <= track.time[hi]
+                let mid = (lo + hi) / 2;
+                if track.time[mid] <= t_s { lo = mid; } else { hi = mid; }
+            }
+        }
+
+        let (lat, lon) = if lo == hi {
+            (track.lat[lo], track.lon[lo])
+        } else {
+            let t0 = track.time[lo];
+            let t1 = track.time[hi];
+            let frac = ((t_s - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            let lat = track.lat[lo] + (track.lat[hi] - track.lat[lo]) * frac;
+            let lon = track.lon[lo] + (track.lon[hi] - track.lon[lo]) * frac;
+            (lat, lon)
+        };
+
+        // Project and normalize against full-track bounds (same as get_gps_polyline)
+        let lat0 = track.lat[0].to_radians();
+        let lon0 = track.lon[0].to_radians();
+        let r_earth = 6_371_000.0_f64;
+
+        // Precompute bounds
+        let mut minx = f64::INFINITY; let mut maxx = f64::NEG_INFINITY;
+        let mut miny = f64::INFINITY; let mut maxy = f64::NEG_INFINITY;
+        for i in 0..n {
+            let lat_i = track.lat[i].to_radians();
+            let lon_i = track.lon[i].to_radians();
+            let dx = (lon_i - lon0) * lat0.cos() * r_earth;
+            let dy = (lat_i - lat0) * r_earth;
+            minx = minx.min(dx); maxx = maxx.max(dx);
+            miny = miny.min(dy); maxy = maxy.max(dy);
+        }
+        let cx = (minx + maxx) * 0.5;
+        let cy = (miny + maxy) * 0.5;
+        let max_range = (maxx - minx).abs().max((maxy - miny).abs()).max(1e-6);
+
+        let lat_r = lat.to_radians();
+        let lon_r = lon.to_radians();
+        let dx = (lon_r - lon0) * lat0.cos() * r_earth;
+        let dy = (lat_r - lat0) * r_earth;
+        let x_norm = ((dx - cx) / max_range) + 0.5;
+        let y_norm = ((cy - dy) / max_range) + 0.5;
+
+        serde_json_to_qt_array(&serde_json::json!([x_norm, y_norm, lat, lon]))
+    }
+
+    fn has_gps(&self) -> bool {
+        self.stabilizer.get_gps_track().is_some()
+    }
+    fn has_motion_directions(&self) -> bool {
+        self.stabilizer.pose_estimator.sync_results.try_read()
+            .map_or(false, |sr| sr.values().any(|fr| fr.transl_dir.is_some()))
+    }
+    // Load GPX file and subtracts video start time from the timestamps
+    fn load_gpx(&self, url: QUrl) {
+        let url = util::qurl_to_encoded(url);
+        if url.is_empty() { return; }
+        
+        // Fail if no video is loaded
+        let video_creation_time = self.stabilizer.params.read().video_created_at.unwrap_or(0) as f64;
+        
+        let file_path = filesystem::url_to_path(&url);
+        match gyroflow_core::gps::parse_gpx_file(&file_path) {
+            Ok(track) => {
+                self.stabilizer.set_gpx_track(track.with_subtracted_time(video_creation_time as f64));
+                self.chart_data_changed();
+            }
+            Err(err) => {
+                self.error(QString::from("An error occured: %1"), QString::from(err.to_string()), QString::default());
+            }
+        }
+    }
+    fn export_synchronized_gpx(&self, url: QUrl) {
+        let url = util::qurl_to_encoded(url);
+        if url.is_empty() { return; }
+        
+        let gps_source = self.stabilizer.gps.read();
+        let Some(track) = gps_source.track.as_ref() else { 
+            self.error(QString::from("An error occured: %1"), QString::from("No GPS track loaded"), QString::default());
+            return;
+        };
+        let video_start_time = self.stabilizer.params.read().video_created_at.unwrap_or(0) as f64;
+        // When exporting synchronized GPX, we apply the offset to get back to absolute epoch time
+        // This way, when the GPX is loaded again, the synchronization is preserved in the timestamps
+        let offset = gps_source.offset_ms / 1000.0;
+        let file_path = filesystem::url_to_path(&url);
+        if let Err(err) = gyroflow_core::gps::save_gpx_file(&file_path, video_start_time + offset, track) {
+            self.error(QString::from("An error occured: %1"), QString::from(err.to_string()), QString::default());
+        }
+    }
+    fn get_gpx_summary(&self) -> QJsonObject {
+        use crate::util::serde_json_to_qt_object;
+        serde_json_to_qt_object(&self.stabilizer.get_gpx_summary())
+    }
+
+    fn recompute_gps_sync(&self) {
+        if self.stabilizer.gps.read().sync_mode == GPSSyncMode::Auto {
+            self.stabilizer.gps.write().synchronize_with_gyro(&self.stabilizer.gyro.read());
+        }
+        // Trigger UI updates
+        self.gps_changed();
+        self.chart_data_changed();
+    }
+    fn get_gps_offset_ms(&self) -> f64 { self.stabilizer.get_gps_offset_ms() }
+    fn set_gps_offset_ms(&self, offset_ms: f64) { self.stabilizer.set_gps_offset_ms(offset_ms); self.gps_changed(); self.chart_data_changed(); }
+    fn get_gps_sync_mode(&self) -> i32 { self.stabilizer.get_gps_sync_mode() }
+    fn set_gps_sync_mode(&self, mode: i32) { 
+        self.stabilizer.set_gps_sync_mode(mode);
+        self.recompute_gps_sync();
+        self.gps_changed();
+    }
+    fn get_gps_sync_quality(&self) -> f64 { self.stabilizer.get_gps_sync_quality() }
+    fn get_gps_anchor(&self) -> QString { QString::from(self.stabilizer.get_gps_anchor()) }
+    fn get_gps_overlap(&self) -> f64 { self.stabilizer.get_gps_overlap() }
+    fn get_gps_use_processed_motion(&self) -> bool { self.stabilizer.get_gps_use_processed_motion() }
+    fn get_gps_speed_threshold(&self) -> f64 { 
+        self.stabilizer.get_gps_speed_threshold() 
+    }
+    fn set_gps_speed_threshold(&self, threshold: f64) {
+        self.stabilizer.set_gps_speed_threshold(threshold);
+        self.recompute_gps_sync();
+        self.gps_changed();
+    }
+    fn get_gps_max_time_offset(&self) -> f64 { 
+        self.stabilizer.get_gps_max_time_offset() 
+    }
+    fn set_gps_max_time_offset(&self, shift: f64) {
+        self.stabilizer.set_gps_max_time_offset(shift);
+        self.recompute_gps_sync();
+        self.gps_changed();
+    }
+    fn set_gps_use_processed_motion(&self, use_processed_motion: bool) { 
+        self.stabilizer.set_gps_use_processed_motion(use_processed_motion);
+        // Auto-recompute GPS sync with new motion setting
+        self.recompute_gps_sync();
+        self.gps_changed();
+    }
+    
     fn mesh_at_frame(&self, frame: usize) -> QVariantList {
         let gyro = self.stabilizer.gyro.read();
         let file_metadata = gyro.file_metadata.read();

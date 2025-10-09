@@ -19,6 +19,45 @@ mod find_offset { pub mod rs_sync; pub mod essential_matrix; pub mod visual_feat
 
 use super::gyro_source::TimeIMU;
 
+/// Represents the quality metrics for pose estimation
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PoseQuality {
+    /// Ratio of inlier points to total points (0.0 to 1.0)
+    pub inlier_ratio: f64,
+    /// Median epipolar error in pixels // TODO: choose the best unit in GUI
+    pub median_epi_err: f64,
+}
+
+impl PoseQuality {
+    /// Create a new PoseQuality with the given values
+    pub fn new(inlier_ratio: f64, median_epi_err: f64) -> Self {
+        Self {
+            inlier_ratio: inlier_ratio.max(0.0).min(1.0), // Clamp to [0, 1]
+            median_epi_err: median_epi_err.max(0.0), // Ensure non-negative
+        }
+    }
+
+    /// Create a default PoseQuality with zero values
+    pub fn default() -> Self {
+        Self {
+            inlier_ratio: 0.0,
+            median_epi_err: 0.0,
+        }
+    }
+
+    /// Check if the pose quality meets minimum thresholds
+    pub fn meets_thresholds(&self, min_inlier_ratio: f64, max_epi_err: f64) -> bool {
+        self.inlier_ratio >= min_inlier_ratio && 
+        (max_epi_err <= 0.0 || self.median_epi_err <= max_epi_err)
+    }
+}
+
+impl Default for PoseQuality {
+    fn default() -> Self {
+        Self::default()
+    }
+}
+
 pub mod optimsync;
 mod autosync;
 pub use autosync::AutosyncProcess;
@@ -41,13 +80,36 @@ pub struct SyncParams {
     pub time_per_syncpoint: f64,
     pub of_method: usize,
     pub offset_method: usize,
-    pub pose_method: usize,
+    pub pose_method: String,
     pub custom_sync_pattern: serde_json::Value,
-    pub auto_sync_points: bool
+    pub auto_sync_points: bool,
+}
+/// High-level selection of the pose method from UI, without tunable parameters
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum PoseMethodKind { EssentialLMEDS, EssentialRANSAC, Almeida, EightPoint, Homography }
+impl Default for PoseMethodKind { fn default() -> Self { PoseMethodKind::EssentialLMEDS } }
+
+
+impl SyncParams {
+    /// Single source of truth for motion-estimation defaults. Starts from optional lens sync settings
+    /// and adapts for the lightweight estimate_motion_from_video mode.
+    pub fn for_motion_estimation(lens_sync_settings: Option<&serde_json::Value>) -> Self {
+        let mut p = lens_sync_settings
+            .and_then(|v| serde_json::from_value::<Self>(v.clone()).ok())
+            .unwrap_or_default();
+        // Ensure valid minimal settings without hard-coded magic numbers
+        p.max_sync_points = p.max_sync_points.max(1);
+        p.every_nth_frame = p.every_nth_frame.max(1);
+        // These are not needed for motion estimation
+        p.auto_sync_points = false;
+        p
+    }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct FrameResult {
+    #[serde(skip)]
     pub of_method: OpticalFlowMethod,
     pub frame_no: usize,
     pub timestamp_us: i64,
@@ -56,7 +118,10 @@ pub struct FrameResult {
     pub rotation: Option<Rotation3<f64>>,
     pub quat: Option<Quat64>,
     pub euler: Option<(f64, f64, f64)>,
+    pub transl_dir: Option<[f64; 3]>,
+    pub pose_quality: Option<PoseQuality>,
 
+    #[serde(skip)]
     optical_flow: RefCell<BTreeMap<usize, OpticalFlowPairWithTs>>
 }
 unsafe impl Send for FrameResult {}
@@ -64,16 +129,31 @@ unsafe impl Sync for FrameResult {}
 
 #[derive(Default)]
 pub struct PoseEstimator {
-    pub sync_results: Arc<RwLock<BTreeMap<i64, FrameResult>>>,
+    // results 
+    pub sync_results: Arc<RwLock<BTreeMap<i64, FrameResult>>>,  // TODO: rename to analysis_results
     pub estimated_gyro: Arc<RwLock<BTreeMap<i64, TimeIMU>>>,
     pub estimated_quats: Arc<RwLock<TimeQuat>>,
+    // parameters
     pub lpf: AtomicU32,
     pub every_nth_frame: AtomicU32,
-    pub pose_method: AtomicU32,
+    pub pose_config: RwLock<String>,
     pub offset_method: AtomicU32,
 }
 
 impl PoseEstimator {
+    /// Creates an isolated clone that copies current computed data but creates independent state.
+    pub fn clone_isolated(&self) -> Self {
+        Self {
+            sync_results: Arc::new(RwLock::new(self.sync_results.read().clone())),
+            estimated_gyro: Arc::new(RwLock::new(self.estimated_gyro.read().clone())),
+            estimated_quats: Arc::new(RwLock::new(self.estimated_quats.read().clone())),
+
+            lpf: self.lpf.load(SeqCst).into(),
+            every_nth_frame: self.every_nth_frame.load(SeqCst).into(),
+            pose_config: RwLock::new(self.pose_config.read().clone()),
+            offset_method: self.offset_method.load(SeqCst).into(),
+        }
+    }
     pub fn clear(&self) {
         self.sync_results.write().clear();
         self.estimated_gyro.write().clear();
@@ -93,6 +173,8 @@ impl PoseEstimator {
                 rotation: None,
                 quat: None,
                 euler: None,
+                transl_dir: None,
+                pose_quality: None,
                 optical_flow: Default::default()
             };
             let mut l = self.sync_results.write();
@@ -107,8 +189,10 @@ impl PoseEstimator {
             .collect()
     }
 
+    /// Computes camera motion between unprocessed consecutive frames using optical flow and pose estimation.
     pub fn process_detected_frames(&self, fps: f64, scaled_fps: f64, params: &ComputeParams) {
         let every_nth_frame = self.every_nth_frame.load(SeqCst) as f64;
+        // Find unprocessed consecutive frame pairs
         let mut frames_to_process = Vec::new();
         {
             let l = self.sync_results.read();
@@ -121,9 +205,18 @@ impl PoseEstimator {
             }
         }
 
-        let results = self.sync_results.clone();
-        let mut pose = EstimatePoseMethod::from(self.pose_method.load(SeqCst));
+        // Set up relative pose estimation
+        let cfg = match self.pose_config.read().clone().as_str() {
+            "EssentialLMEDS" => PoseMethodKind::EssentialLMEDS,
+            "EssentialRANSAC" => PoseMethodKind::EssentialRANSAC,
+            "Almeida" => PoseMethodKind::Almeida,
+            "EightPoint" => PoseMethodKind::EightPoint,
+            "Homography" => PoseMethodKind::Homography,
+            _ => PoseMethodKind::EssentialLMEDS,
+        };
+        let mut pose = crate::synchronization::estimate_pose::RelativePoseMethod::from(&cfg);
         pose.init(params);
+        let results = self.sync_results.clone();
         frames_to_process.par_iter().for_each(move |(ts, next_ts)| {
             {
                 let l = results.read();
@@ -138,13 +231,22 @@ impl PoseEstimator {
                             // Unlock the mutex for estimate_pose
                             drop(l);
 
-                            if let Some(rot) = pose.estimate_pose(&curr_of.optical_flow_to(&next_of), curr_of.size(), params, *ts, *next_ts) {
+                            // Compute optical flow and relative pose between frames
+                            if let Some(rp) = pose.estimate_relative_pose(&curr_of.optical_flow_to(&next_of), curr_of.size(), params, *ts, *next_ts) {
+                                // Store rotation, translation direction, and quality metrics in self.sync_results
                                 let mut l = results.write();
                                 if let Some(x) = l.get_mut(ts) {
-                                    x.rotation = Some(rot);
-                                    x.quat = Some(Quat64::from(rot));
-                                    let rotvec = rot.scaled_axis() * (scaled_fps / every_nth_frame);
+                                    x.rotation = Some(rp.rotation);
+                                    x.quat = Some(Quat64::from(rp.rotation));
+                                    let rotvec = rp.rotation.scaled_axis() * (scaled_fps / every_nth_frame);
                                     x.euler = Some((rotvec[0], rotvec[1], rotvec[2]));
+                                    if let Some(tdir) = rp.transl_dir.as_ref() {
+                                        x.transl_dir = Some([tdir.x, tdir.y, tdir.z]);
+                                    }
+                                    x.pose_quality = Some(PoseQuality::new(
+                                        rp.inlier_ratio.unwrap_or(0.0), 
+                                        rp.median_epi_err.unwrap_or(0.0)
+                                    ));
                                 } else {
                                     log::warn!("Failed to get ts {}", ts);
                                 }
@@ -154,7 +256,7 @@ impl PoseEstimator {
                 }
             }
 
-            // Free unneeded img memory
+            // Free unneeded image memory (optical flow)
             let mut l = results.write();
             if let Some(curr) = l.get_mut(ts) {
                 if curr.of_method.can_cleanup() { curr.of_method.cleanup(); }
@@ -193,6 +295,8 @@ impl PoseEstimator {
     }
 
     pub fn cache_optical_flow(&self, num_frames: usize) {
+        // Computes and caches the optical flow for the given number of frames 
+        // in self.sync_results[i].
         let l = self.sync_results.read();
         let keys: Vec<i64> = l.keys().copied().collect();
         for (i, k) in keys.iter().enumerate() {
@@ -358,6 +462,83 @@ impl PoseEstimator {
 
         *self.estimated_gyro.write() = gyro;
         *self.estimated_quats.write() = quats;
+    }
+
+    pub fn get_transl_dir_near(&self, timestamp_us: i64, window_us: i64, use_average: bool) -> Option<([f64; 3], PoseQuality)> {
+        // Use try_read to avoid blocking the UI thread during motion direction stabilization
+        let l = match self.sync_results.try_read() {
+            Some(lock) => {
+                lock
+            },
+            None => {
+                // If we can't get the lock immediately, return None to avoid blocking
+                println!("get_transl_dir_near() could not acquire sync_results read lock, skipping motion direction lookup");
+                return None;
+            }
+        };
+        
+        let start = timestamp_us.saturating_sub(window_us);
+        let end = timestamp_us.saturating_add(window_us);
+
+        if use_average {
+            // Collect all translation directions and pose qualities in the window
+            let mut translations = Vec::new();
+            let mut pose_qualities = Vec::new();
+            
+            for (ts, fr) in l.range(start..=end) {
+                if let Some(t) = fr.transl_dir {
+                    translations.push(t);
+                    pose_qualities.push(fr.pose_quality.clone().unwrap_or_default());
+                }
+            }
+            
+            if translations.is_empty() {
+                return None;
+            }
+            
+            // Calculate average translation direction
+            let mut avg_translation = [0.0; 3];
+            for t in &translations {
+                avg_translation[0] += t[0];
+                avg_translation[1] += t[1];
+                avg_translation[2] += t[2];
+            }
+            let count = translations.len() as f64;
+            avg_translation[0] /= count;
+            avg_translation[1] /= count;
+            avg_translation[2] /= count;
+            
+            // Calculate average pose quality
+            let mut avg_inlier_ratio = 0.0;
+            let mut avg_median_epi_err = 0.0;
+            for pq in &pose_qualities {
+                avg_inlier_ratio += pq.inlier_ratio;
+                avg_median_epi_err += pq.median_epi_err;
+            }
+            avg_inlier_ratio /= count;
+            avg_median_epi_err /= count;
+            
+            let avg_pose_quality = PoseQuality::new(avg_inlier_ratio, avg_median_epi_err);
+            
+            Some((avg_translation, avg_pose_quality))
+        } else {
+            // Original behavior: find closest frame
+            let mut best: Option<(i64, [f64; 3], PoseQuality)> = None;
+            
+            for (ts, fr) in l.range(start..=end) {
+                if let Some(t) = fr.transl_dir {
+                    let qual = fr.pose_quality.clone().unwrap_or_default();
+                    let dist = (timestamp_us - *ts).abs();
+                    match best {
+                        None => best = Some((dist, t, qual)),
+                        Some((b_dist, _, _)) if dist < b_dist => best = Some((dist, t, qual)),
+                        _ => {}
+                    }
+                }
+            }
+            
+            best.map(|(_, t, q)| (t, q))
+        }
     }
 
     pub fn get_ranges(&self) -> Vec<(i64, i64)> {

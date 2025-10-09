@@ -75,7 +75,7 @@ install-deps:
         #Remove-Item -Path "C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0" -Recurse -Force
         #Remove-Item -Path "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0" -Recurse -Force
         .\vcpkg\vcpkg install "flatbuffers:{{VcpkgArch}}" --cmake-args=-DVCPKG_BUILD_TYPE=release
-        .\vcpkg\vcpkg install "opencv4[core,calib3d,opencl,thread,intrinsics]:{{VcpkgArch}}" --cmake-args=-DVCPKG_BUILD_TYPE=release
+        .\vcpkg\vcpkg install "opencv4[core,calib3d,opencl,thread,intrinsics,png]:{{VcpkgArch}}" --cmake-args=-DVCPKG_BUILD_TYPE=release
         .\vcpkg\vcpkg install "opencl:{{VcpkgArch}}" --cmake-args=-DVCPKG_BUILD_TYPE=release
         rm -Recurse -Force .\vcpkg\buildtrees
         rm -Recurse -Force .\vcpkg\downloads
