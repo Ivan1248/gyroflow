@@ -165,29 +165,15 @@ impl StabilizationManager {
     }
     pub fn get_gps_offset_ms(&self) -> f64 { self.gps.read().offset_ms }
     pub fn set_gps_offset_ms(&self, offset_ms: f64) { self.gps.write().offset_ms = offset_ms; }
-    pub fn clear_gps(&self) { self.gps.write().clear(); }
+    pub fn clear_gps_data(&self) { self.gps.write().clear_data(); }
+    pub fn get_gps_use_processed_motion(&self) -> bool { self.gps.read().use_processed_motion }
+    pub fn set_gps_use_processed_motion(&self, use_processed_motion: bool) { self.gps.write().use_processed_motion = use_processed_motion; }
     pub fn get_gps_sync_mode(&self) -> i32 {
         match self.gps.read().sync_mode { crate::gps::source::GPSSyncMode::Off => 0, crate::gps::source::GPSSyncMode::Auto => 1, crate::gps::source::GPSSyncMode::Manual => 2 }
     }
-    pub fn set_gps_sync_mode(&self, mode: i32) -> bool {
+    pub fn set_gps_sync_mode(&self, mode: i32) {
         use crate::gps::source::GPSSyncMode as M;
-        let m = match mode { 1 => M::Auto, 2 => M::Manual, _ => M::Off };
-        let mut auto_sync_performed = false;
-        {
-            let mut gps = self.gps.write();
-            let prev = gps.sync_mode;
-            gps.set_sync_mode(m);
-            if m == M::Auto && prev != M::Auto {
-                // Try to refresh auto offset immediately using current params
-                if gps.sync_mode == crate::gps::source::GPSSyncMode::Auto { 
-                    let sample_rate_hz = 10.0;
-                    let max_offset = 20.0;
-                    gps.synchronize_with_gyro(&self.gyro.read(), sample_rate_hz, max_offset); 
-                    auto_sync_performed = true;
-                }
-            }
-        }
-        auto_sync_performed
+        self.gps.write().set_sync_mode(match mode { 1 => M::Auto, 2 => M::Manual, _ => M::Off });
     }
     pub fn get_gps_anchor(&self) -> String {
         use crate::gps::source::TimeAlignment;
@@ -215,6 +201,10 @@ impl StabilizationManager {
         self.get_gps_overlap()
     }
     pub fn get_gps_track(&self) -> Option<crate::gps::GPSTrack> { self.gps.read().track.clone() }
+    pub fn get_gps_speed_threshold(&self) -> f64 { self.gps.read().get_speed_threshold() }
+    pub fn set_gps_speed_threshold(&self, threshold: f64) { self.gps.write().set_speed_threshold(threshold); }
+    pub fn get_gps_max_time_offset(&self) -> f64 { self.gps.read().get_max_time_offset() }
+    pub fn set_gps_max_time_offset(&self, shift: f64) { self.gps.write().set_max_time_offset(shift); }
     
     pub fn init_from_video_data(&self, duration_ms: f64, fps: f64, frame_count: usize, video_size: (usize, usize)) {
         {
@@ -1315,6 +1305,7 @@ impl StabilizationManager {
         self.keyframes.write().clear();
 
         self.pose_estimator.clear();
+        self.clear_gps_data();
     }
 
     pub fn override_video_fps(&self, fps: f64, recompute: bool) {

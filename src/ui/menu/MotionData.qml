@@ -734,7 +734,7 @@ MenuItem {
         id: gpsSection;
         width: parent.width;
         spacing: 6 * dpiScale;
-        visible: controller.has_gps();
+        visible: controller.has_gps;
 
         Label {
             position: Label.LeftPosition;
@@ -745,11 +745,37 @@ MenuItem {
                 model: [qsTr("Off"), qsTr("Auto"), qsTr("Manual")];
                 font.pixelSize: 12 * dpiScale;
                 width: parent.width;
-                currentIndex: controller.get_gps_sync_mode();
+                currentIndex: controller.gps_sync_mode;
                 onCurrentIndexChanged: {
-                    controller.set_gps_sync_mode(currentIndex);
-                    currentIndex = controller.get_gps_sync_mode();
+                    controller.gps_sync_mode = currentIndex;
+                    currentIndex = controller.gps_sync_mode;
                 }
+            }
+        }
+        CheckBox {
+            id: gpsUseProcessedMotion;
+            text: qsTr("Use processed motion for sync");
+            visible: gpsSyncMode.currentIndex === 1;
+            checked: controller.gps_use_processed_motion;
+            tooltip: qsTr("Use motion data stabilization and smoothing aplied for GPS synchronization. Motion direction alignment can improve accuracy for head-mounted camera recordings.");
+            onCheckedChanged: controller.gps_use_processed_motion = checked;
+        }
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("GPS Speed Threshold");
+            visible: gpsSyncMode.currentIndex === 1;
+
+            NumberField {
+                id: gpsSpeedThreshold;
+                visible: gpsSyncMode.currentIndex === 1;
+                unit: "m/s";
+                precision: 1;
+                from: 0.1;
+                to: 10.0;
+                value: controller.gps_speed_threshold;
+                width: parent.width;
+                tooltip: qsTr("Speed threshold for GPS masking. Regions with speed below this threshold will be shaded on the GPS chart, indicating unreliable GPS data.");
+                onValueChanged: controller.gps_speed_threshold = value;
             }
         }
         Label {
@@ -757,24 +783,20 @@ MenuItem {
             position: Label.LeftPosition;
             text: qsTr("GPS offset")
 
-            Row {
-                id: gpsOffsetRow;
-                spacing: 6 * dpiScale;
-                NumberField {
-                    id: gpsOffset;
-                    width: Math.max(120 * dpiScale, root.width - 350 * dpiScale);
-                    height: 25 * dpiScale;
-                    precision: 3;
-                    unit: qsTr("s");
-                    value: controller.get_gps_offset_ms() / 1000.0;
-                    enabled: gpsSyncMode.currentIndex === 2;
-                    onEditingFinished: if (gpsSyncMode.currentIndex === 2) controller.set_gps_offset_ms(value * 1000.0);
+            NumberField {
+                id: gpsOffset;
+                width: Math.max(120 * dpiScale, root.width - 350 * dpiScale);
+                height: 25 * dpiScale;
+                precision: 2;
+                unit: qsTr("s");
+                value: controller.gps_offset_ms / 1000.0;
+                enabled: gpsSyncMode.currentIndex === 2;
+                onEditingFinished: if (gpsSyncMode.currentIndex === 2) controller.gps_offset_ms = value * 1000.0;
 
-                    Connections {
-                        target: controller;
-                        function onGps_offset_changed() {
-                            gpsOffset.value = controller.get_gps_offset_ms() / 1000.0;
-                        }
+                Connections {
+                    target: controller;
+                    function onGps_changed() {
+                        gpsOffset.value = controller.gps_offset_ms / 1000.0;
                     }
                 }
             }
@@ -787,12 +809,11 @@ MenuItem {
                 const mode = modes[gpsSyncMode.currentIndex] || qsTr("Off");
                 const anchor = controller.get_gps_anchor();
                 const overlap = controller.get_gps_overlap();
-                const off = controller.get_gps_offset_ms() / 1000.0;
+                const off = controller.gps_offset_ms / 1000.0;
                 
-                let t = qsTr("GPS sync: %1").arg(mode);
-                t += qsTr(", offset: %1 s").arg(off.toFixed(3));
+                let t = qsTr("GPS offset: %1 s").arg(off.toFixed(2));
                 t += qsTr(", anchor: %1").arg(anchor);
-                t += qsTr(", overlap: %1%").arg((overlap * 100).toFixed(1));
+                t += qsTr(", overlap: %1%").arg(overlap.toFixed(3));
                 
                 if (overlap <= 0.0) {
                     t += " — " + qsTr("No overlap; relative timeline");
@@ -803,7 +824,12 @@ MenuItem {
         CheckBoxWithContent {
             id: gpsMapCheckbox;
             text: qsTr("GPS map");
-            onCheckedChanged: { if (gpsMapCheckbox.checked) gpsMap.refreshPolyline(); Qt.callLater(gpsMap.requestPaint); }
+            onCheckedChanged: { 
+                if (gpsMapCheckbox.checked) {
+                    gpsMap.refreshPolyline();
+                }
+                Qt.callLater(gpsMap.requestPaint); 
+            }
         }
         Canvas {
             id: gpsMap
@@ -820,6 +846,15 @@ MenuItem {
             function updatePosition(timestamp: real): void {
                 cur = controller.get_gps_current_xy(Math.round(timestamp));
                 requestPaint();
+            }
+
+            Connections {
+                target: controller;
+                function onGps_changed(): void {
+                    if (gpsMapCheckbox.checked) {
+                        gpsMap.refreshPolyline();
+                    }
+                }
             }
 
             onPaint: {
@@ -859,7 +894,7 @@ MenuItem {
                     const x = s * cur[0] + vx;
                     const y = s * cur[1] + vy;
                     ctx.fillStyle = styleAccentColor;
-                    ctx.beginPath(); ctx.arc(x, y, 5, 0, 2*Math.PI); ctx.fill();
+                    ctx.beginPath(); ctx.arc(x, y, 3, 0, 2*Math.PI); ctx.fill();
                 }
             }
             Component.onCompleted: refreshPolyline()
@@ -867,7 +902,7 @@ MenuItem {
         Connections {
             target: controller
             function onChart_data_changed(): void {
-                gpsSection.visible = controller.has_gps();
+                gpsSection.visible = controller.has_gps;
                 if (gpsSection.visible && gpsMapCheckbox.checked) gpsMap.refreshPolyline();
             }
         }

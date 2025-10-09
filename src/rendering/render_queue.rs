@@ -1445,7 +1445,6 @@ impl RenderQueue {
             processing_cb(0.01);
             use gyroflow_core::synchronization::AutosyncProcess;
             use gyroflow_core::synchronization;
-            use crate::rendering::VideoProcessor;
             use itertools::Either;
 
             if let Ok(mut sync_params) = serde_json::from_value(sync_settings) as serde_json::Result<synchronization::SyncParams> {
@@ -1472,8 +1471,6 @@ impl RenderQueue {
                     sync_params.initial_offset     *= 1000.0; // s to ms
                     sync_params.time_per_syncpoint *= 1000.0; // s to ms
                     sync_params.search_size        *= 1000.0; // s to ms
-
-                    let every_nth_frame = sync_params.every_nth_frame.max(1);
 
                     let size = stab.params.read().size;
 

@@ -4,6 +4,7 @@
 pub mod horizon;
 pub mod none;
 pub mod plain;
+pub mod simple;
 pub mod fixed;
 pub mod default_algo;
 mod motion_direction;
@@ -40,6 +41,7 @@ impl Default for Algs {
             Box::new(self::none::None::default()),
             Box::new(self::default_algo::DefaultAlgo::default()),
             Box::new(self::plain::Plain::default()),
+            Box::new(self::simple::Simple::default()),
             Box::new(self::fixed::Fixed::default()),
         ])
     }

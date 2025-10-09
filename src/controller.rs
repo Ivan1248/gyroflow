@@ -19,6 +19,7 @@ use crate::core::calibration::LensCalibrator;
 use crate::core::synchronization::AutosyncProcess;
 use crate::core::stabilization::KernelParamsFlags;
 use crate::core::synchronization;
+use crate::core::gps::source::GPSSyncMode;
 use crate::core::keyframes::*;
 use crate::core::filesystem;
 use crate::rendering;
@@ -79,7 +80,7 @@ pub struct Controller {
     get_smoothing_max_angles: qt_method!(fn(&self) -> QJsonArray),
     get_smoothing_status: qt_method!(fn(&self) -> QJsonArray),
     set_smoothing_param: qt_method!(fn(&self, name: QString, val: f64)),
-    // Motion direction controls
+
     set_motion_direction_alignment: qt_method!(fn(&self, enabled: bool)),
     set_motion_direction_param: qt_method!(fn(&self, name: QString, val: f64)),
     load_motion_direction_params: qt_method!(fn(&self, params_json: QString)),
@@ -307,25 +308,26 @@ pub struct Controller {
     preview_pipeline: Arc<AtomicUsize>,
 
     ongoing_computations: BTreeSet<u64>,
-
+    
     pub stabilizer: Arc<StabilizationManager>,
+    
+    has_motion_directions: qt_method!(fn(&self) -> bool),
 
     load_gpx: qt_method!(fn(&self, url: QUrl)),
     export_synchronized_gpx: qt_method!(fn(&self, url: QUrl)),
     get_gpx_summary: qt_method!(fn(&self) -> QJsonObject),
-    get_gps_offset_ms: qt_method!(fn(&self) -> f64),
-    set_gps_offset_ms: qt_method!(fn(&self, offset_ms: f64)),
-    clear_gps: qt_method!(fn(&self)),
-    get_gps_sync_mode: qt_method!(fn(&self) -> i32),
-    set_gps_sync_mode: qt_method!(fn(&self, mode: i32)),
+    gps_sync_mode: qt_property!(i32; READ get_gps_sync_mode WRITE set_gps_sync_mode NOTIFY gps_changed),
+    gps_offset_ms: qt_property!(f64; READ get_gps_offset_ms WRITE set_gps_offset_ms NOTIFY gps_changed),
+    gps_use_processed_motion: qt_property!(bool; READ get_gps_use_processed_motion WRITE set_gps_use_processed_motion NOTIFY gps_changed),
+    gps_speed_threshold: qt_property!(f64; READ get_gps_speed_threshold WRITE set_gps_speed_threshold NOTIFY gps_changed),
+    gps_max_time_offset: qt_property!(f64; READ get_gps_max_time_offset WRITE set_gps_max_time_offset NOTIFY gps_changed),
+    has_gps: qt_property!(bool; READ has_gps NOTIFY chart_data_changed),
     get_gps_sync_quality: qt_method!(fn(&self) -> f64),
     get_gps_anchor: qt_method!(fn(&self) -> QString),
     get_gps_overlap: qt_method!(fn(&self) -> f64),
-    has_gps: qt_method!(fn(&self) -> bool),
-    has_motion_directions: qt_method!(fn(&self) -> bool),
     get_gps_polyline: qt_method!(fn(&self, max_points: usize) -> QJsonArray),
     get_gps_current_xy: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
-    gps_offset_changed: qt_signal!(),
+    gps_changed: qt_signal!(),
 }
 
 impl Controller {
@@ -354,6 +356,7 @@ impl Controller {
         self.chart_data_changed();
         self.keyframes_changed();
         self.update_offset_model();
+        self.gps_changed();  // Update GPS settings in GUI after clearing
 
         *self.stabilizer.input_file.write() = gyroflow_core::InputFile {
             url: url.clone(),
@@ -580,7 +583,9 @@ impl Controller {
                     if let Some(keyframes) = self.stabilizer.keyframes.try_read() {
                         let gps_track = self.stabilizer.get_gps_track();
                         let gps_offset_ms = self.stabilizer.get_gps_offset_ms();
-                        chart.setFromGyroSource(&gyro, &params, &keyframes, gps_track, gps_offset_ms, &series);
+                        let gps_use_processed_motion = self.stabilizer.get_gps_use_processed_motion();
+                        let gps_speed_threshold = self.stabilizer.get_gps_speed_threshold();
+                        chart.setFromGyroSource(&gyro, &params, &keyframes, gps_track, gps_offset_ms, gps_use_processed_motion, gps_speed_threshold, &series);
                         return true;
                     }
                 }
@@ -727,6 +732,8 @@ impl Controller {
                 stab2.invalidate_ongoing_computations();
                 stab2.invalidate_smoothing();
                 this.request_recompute();
+                // Recompute GPS sync after new gyro data is loaded
+                this.recompute_gps_sync();
             });
             let load_lens = util::qt_queued_callback_mut(self, move |this, path: String| {
                 this.load_lens_profile(path.into());
@@ -1214,6 +1221,11 @@ impl Controller {
             this.ongoing_computations.remove(&id);
             let finished = this.ongoing_computations.is_empty();
             this.compute_progress(id, if finished { 1.0 } else { 0.0 });
+            
+            // Recompute GPS sync after smoothing computation is complete
+            if finished {
+                this.recompute_gps_sync();
+            }
         }));
         self.ongoing_computations.insert(id);
 
@@ -1671,23 +1683,48 @@ impl Controller {
         serde_json_to_qt_object(&self.stabilizer.get_gpx_summary())
     }
 
+    fn recompute_gps_sync(&self) {
+        if self.stabilizer.gps.read().sync_mode == GPSSyncMode::Auto {
+            self.stabilizer.gps.write().synchronize_with_gyro(&self.stabilizer.gyro.read());
+        }
+        // Trigger UI updates
+        self.gps_changed();
+        self.chart_data_changed();
+    }
     fn get_gps_offset_ms(&self) -> f64 { self.stabilizer.get_gps_offset_ms() }
-    fn set_gps_offset_ms(&self, offset_ms: f64) { self.stabilizer.set_gps_offset_ms(offset_ms); self.chart_data_changed(); }
-    fn clear_gps(&self) { self.stabilizer.clear_gps(); self.chart_data_changed(); }
+    fn set_gps_offset_ms(&self, offset_ms: f64) { self.stabilizer.set_gps_offset_ms(offset_ms); self.gps_changed(); self.chart_data_changed(); }
     fn get_gps_sync_mode(&self) -> i32 { self.stabilizer.get_gps_sync_mode() }
     fn set_gps_sync_mode(&self, mode: i32) { 
-        let auto_sync_performed = self.stabilizer.set_gps_sync_mode(mode); 
-        self.chart_data_changed(); 
-        if auto_sync_performed {
-            // Auto synchronization was performed, emit signal again to update the offset textbox
-            self.chart_data_changed();
-        }
-        // Emit GPS offset changed signal to update the textbox
-        self.gps_offset_changed();
+        self.stabilizer.set_gps_sync_mode(mode);
+        self.recompute_gps_sync();
+        self.gps_changed();
     }
     fn get_gps_sync_quality(&self) -> f64 { self.stabilizer.get_gps_sync_quality() }
     fn get_gps_anchor(&self) -> QString { QString::from(self.stabilizer.get_gps_anchor()) }
     fn get_gps_overlap(&self) -> f64 { self.stabilizer.get_gps_overlap() }
+    fn get_gps_use_processed_motion(&self) -> bool { self.stabilizer.get_gps_use_processed_motion() }
+    fn get_gps_speed_threshold(&self) -> f64 { 
+        self.stabilizer.get_gps_speed_threshold() 
+    }
+    fn set_gps_speed_threshold(&self, threshold: f64) {
+        self.stabilizer.set_gps_speed_threshold(threshold);
+        self.recompute_gps_sync();
+        self.gps_changed();
+    }
+    fn get_gps_max_time_offset(&self) -> f64 { 
+        self.stabilizer.get_gps_max_time_offset() 
+    }
+    fn set_gps_max_time_offset(&self, shift: f64) {
+        self.stabilizer.set_gps_max_time_offset(shift);
+        self.recompute_gps_sync();
+        self.gps_changed();
+    }
+    fn set_gps_use_processed_motion(&self, use_processed_motion: bool) { 
+        self.stabilizer.set_gps_use_processed_motion(use_processed_motion);
+        // Auto-recompute GPS sync with new motion setting
+        self.recompute_gps_sync();
+        self.gps_changed();
+    }
     
     fn mesh_at_frame(&self, frame: usize) -> QVariantList {
         let gyro = self.stabilizer.gyro.read();
