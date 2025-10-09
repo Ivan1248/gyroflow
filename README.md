@@ -88,9 +88,9 @@ gyroflow video.mp4 \
 ```
 
 
-### GPS synchronization
+### GPS synchronization (single video)
 
-GUI:
+**GUI:**
 1. Run Gyroflow.
 2. Load the video.
 3. In the "Stabilization" section:
@@ -105,7 +105,7 @@ GUI:
 	5. Set GPS speed threshold to 1.5 m/s.
 	6. Once the analysis is complete, save the aligned GPX file, click on the "Export" link to open a menu and click "Export synchronized GPX".
 
-CLI:
+**CLI:**
 
 **Step 1: Create a preset file** (e.g., `gps_preset.json`):
 ```json
@@ -139,26 +139,7 @@ This will:
 3. Automatically synchronize the GPS data using the processed motion direction and provided GPS settings
 4. Export the synchronized GPX file (`--export-gpx synchronized.gpx`)
 
-**Batch processing example with organized outputs:**
-```bash
-# Create output directories
-mkdir -p output/{videos,gpx}
-
-# Process all videos with their corresponding GPX files
-for video in *.mp4; do
-    base="${video%.mp4}"
-    gpx="${base}.gpx"
-    if [ -f "$gpx" ]; then
-        gyroflow "$video" \
-          --preset gps_preset.json \
-          --estimate-motion \
-          --gpx-file "$gpx" \
-          --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'sample_rate_hz': 10 }" \
-          -p "{'output_folder': 'output/videos/'}" \
-          --export-gpx "output/gpx/sync_${base}.gpx"
-    fi
-done
-```
+### Batch processing: motion direction alignment and GPS synchronization
 
 **Batch processing with subdirectories (INSV + GPX files):**
 ```bash
@@ -175,25 +156,20 @@ done
 for session_dir in input_dir/*/; do
     if [ -d "$session_dir" ]; then
         session_name=$(basename "$session_dir")
-        
-        # Create output directory with same structure
         mkdir -p "output/$session_name"
         
-        # Find INSV file (assuming one per directory)
         insv_file=$(find "$session_dir" -name "*.insv" | head -1)
-        
-        # Find GPX file (assuming one per directory)
         gpx_file=$(find "$session_dir" -name "*.gpx" | head -1)
-        
         if [ -f "$insv_file" ] && [ -f "$gpx_file" ]; then
             echo "Processing: $session_name"
+            insv_basename=$(basename "$insv_file" .insv)
             gyroflow "$insv_file" \
-              --preset gps_preset.json \
+              --preset "{ 'version': 2, 'stabilization': { 'fov': 3.222, 'method': 'Plain3D', 'smoothing_params': [{'name': 'time_constant', 'value': 1.0}], 'horizon_lock_amount': 1.0, 'motion_direction_enabled': true, 'motion_direction_params': [{'name': 'flip_backward_dir', 'value': false}] } }" \
               --estimate-motion \
               --gpx-file "$gpx_file" \
               --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'sample_rate_hz': 10 }" \
-              -p "{'output_folder': 'output/$session_name/', 'output_filename': '${session_name}_stabilized.mp4'}" \
-              --export-gpx "output/$session_name/sync_${session_name}.gpx"
+              -p "{'output_folder': 'output/$session_name/', 'output_filename': '${insv_basename}.mp4'}" \
+              --export-gpx "output/$session_name/${insv_basename}.gpx"
         else
             echo "Skipping $session_name: missing INSV or GPX file"
         fi
@@ -205,11 +181,11 @@ done
 ```
 output/
 ├── session1/
-│   ├── session1_stabilized.mp4
-│   └── sync_session1.gpx
+│   ├── video1.mp4
+│   └── sync_video1.gpx
 ├── session2/
-│   ├── session2_stabilized.mp4
-│   └── sync_session2.gpx
+│   ├── video2.mp4
+│   └── sync_video2.gpx
 └── ...
 ```
 
