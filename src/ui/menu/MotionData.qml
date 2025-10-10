@@ -855,9 +855,73 @@ MenuItem {
             onCheckedChanged: { 
                 if (gpsMapCheckbox.checked) {
                     gpsMap.refreshPolyline();
+                    // Initialize coordinates and dot immediately when map is shown
+                    const ts = gpsCoordsRow.currentTimestampUs();
+                    gpsCoordsRow.refreshLatLon(ts);
+                    gpsMap.updatePosition(ts);
                 }
                 Qt.callLater(gpsMap.requestPaint); 
             }
+        }
+        Row {
+            id: gpsCoordsRow;
+            visible: gpsMapCheckbox.checked;
+            spacing: 8 * dpiScale;
+            property var lastLatLon: [];
+            function formatLatLon(lat, lon) {
+                const latStr = (lat >= 0 ? "+" : "") + lat.toFixed(6);
+                const lonStr = (lon >= 0 ? "+" : "") + lon.toFixed(6);
+                return latStr + ", " + lonStr;
+            }
+			function currentTimestampUs() {
+				if (window.videoArea && window.videoArea.timeline) {
+					return Math.round(window.videoArea.timeline.position * window.videoArea.timeline.durationMs * 1000);
+				}
+				return 0;
+			}
+			function refreshLatLon(ts) {
+				const t = (typeof ts === 'number') ? ts : currentTimestampUs();
+				gpsCoordsRow.lastLatLon = controller.get_gps_current_latlon(t);
+			}
+            BasicText {
+                id: gpsLatLonText;
+                // Avoid binding width to parent which can cause polish loops
+                wrapMode: Text.NoWrap;
+                elide: Text.ElideRight;
+                text: gpsCoordsRow.lastLatLon.length === 2 ? gpsCoordsRow.formatLatLon(gpsCoordsRow.lastLatLon[0], gpsCoordsRow.lastLatLon[1]) : qsTr("Lat, Lon: —");
+                readonly property bool hasCoordinates: gpsCoordsRow.lastLatLon.length === 2;
+                color: hasCoordinates ? styleAccentColor : styleTextColor;
+                font.underline: hasCoordinates;
+
+                MouseArea {
+                    id: gpsCopyArea;
+                    anchors.fill: parent;
+                    enabled: parent.hasCoordinates;
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor;
+                    onClicked: if (parent.hasCoordinates) controller.copy_to_clipboard(parent.text);
+                    hoverEnabled: true;
+                }
+                ToolTip {
+                    visible: gpsLatLonText.hasCoordinates && gpsCopyArea.containsMouse;
+                    text: qsTr("Click to copy");
+                }
+            }
+			Connections {
+				target: window.videoArea && window.videoArea.vid ? window.videoArea.vid : null;
+				function onTimestampUsChanged() {
+					const ts = Math.round((window.videoArea && window.videoArea.vid && window.videoArea.vid.timestampUs) || 0);
+					gpsCoordsRow.refreshLatLon(ts);
+				}
+				function onCurrentFrameChanged() {
+					gpsCoordsRow.refreshLatLon();
+				}
+			}
+			Connections {
+				target: controller;
+				function onGps_changed(): void {
+					gpsCoordsRow.refreshLatLon();
+				}
+			}
         }
         Canvas {
             id: gpsMap
