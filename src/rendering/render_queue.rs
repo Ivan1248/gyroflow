@@ -1523,7 +1523,7 @@ impl RenderQueue {
     }
 
     // Lightweight whole-video motion estimation pass
-    fn do_motion_estimation<F: Fn(f64) + Send + Sync + Clone + 'static, F2: Fn((String, String)) + Send + Sync + Clone + 'static>(stab: Arc<StabilizationManager>, processing_cb: F, input_file: &gyroflow_core::InputFile, err: F2, proc_height: i32) {
+    pub fn do_motion_estimation<F: Fn(f64) + Send + Sync + Clone + 'static, F2: Fn((String, String)) + Send + Sync + Clone + 'static>(stab: Arc<StabilizationManager>, processing_cb: F, input_file: &gyroflow_core::InputFile, err: F2, proc_height: i32) {
         use gyroflow_core::synchronization::AutosyncProcess;
         use gyroflow_core::synchronization;
 

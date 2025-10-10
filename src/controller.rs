@@ -83,7 +83,7 @@ pub struct Controller {
 
     set_motion_direction_alignment: qt_method!(fn(&self, enabled: bool)),
     set_motion_direction_param: qt_method!(fn(&self, name: QString, val: f64)),
-    load_motion_direction_params: qt_method!(fn(&self, params_json: QString)),
+    load_motion_direction_params: qt_method!(fn(&self, params_json: QString, enabled: bool)),
     get_motion_direction_status: qt_method!(fn(&self) -> QJsonArray),
     set_horizon_lock: qt_method!(fn(&self, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64)),
     set_use_gravity_vectors: qt_method!(fn(&self, v: bool)),
@@ -92,6 +92,12 @@ pub struct Controller {
     set_processing_resolution: qt_method!(fn(&mut self, target_height: i32)),
     set_background_color: qt_method!(fn(&self, color: QString, player: QJSValue)),
     set_integration_method: qt_method!(fn(&self, index: usize)),
+
+    // Motion estimation settings (shared with CLI/RenderQueue via lens.sync_settings)
+    motion_estimation_settings: qt_property!(QJsonObject; READ get_motion_estimation_settings WRITE set_motion_estimation_settings NOTIFY motion_estimation_settings_changed),
+    motion_estimation_settings_changed: qt_signal!(),
+    run_motion_estimation: qt_method!(fn(&mut self)),
+    can_run_motion_estimation: qt_method!(fn(&self) -> bool),
 
     set_offset: qt_method!(fn(&self, timestamp_us: i64, offset_ms: f64)),
     remove_offset: qt_method!(fn(&self, timestamp_us: i64)),
@@ -327,10 +333,42 @@ pub struct Controller {
     get_gps_overlap: qt_method!(fn(&self) -> f64),
     get_gps_polyline: qt_method!(fn(&self, max_points: usize) -> QJsonArray),
     get_gps_current_xy: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
+    get_gps_current_latlon: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
     gps_changed: qt_signal!(),
 }
 
 impl Controller {
+    fn get_motion_estimation_settings(&self) -> QJsonObject {
+        use crate::util::serde_json_to_qt_object;
+        let settings = self.stabilizer.lens.read().sync_settings.clone().unwrap_or_default();
+        serde_json_to_qt_object(&settings)
+    }
+
+    fn set_motion_estimation_settings(&mut self, obj: QJsonObject) {
+        // Convert QJsonObject -> serde_json::Value via Qt's JSON serialization
+        let json: serde_json::Value = serde_json::from_str(&obj.to_json().to_string()).unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+        // Persist as lens.sync_settings so CLI/RenderQueue share the same defaults
+        self.stabilizer.lens.write().sync_settings = Some(json);
+        self.motion_estimation_settings_changed();
+    }
+
+    fn can_run_motion_estimation(&self) -> bool {
+        // Require a loaded video and no running sync
+        if self.sync_in_progress { return false; }
+        let url = self.stabilizer.input_file.read().url.clone();
+        !url.is_empty()
+    }
+
+    fn run_motion_estimation(&mut self) {
+        if !self.can_run_motion_estimation() { return; }
+        // Build SyncParams from lens.sync_settings using the SSoT helper
+        let sync_params = crate::core::synchronization::SyncParams::for_motion_estimation(
+            self.stabilizer.lens.read().sync_settings.as_ref()
+        );
+        let json = serde_json::to_string(&sync_params).unwrap_or_else(|_| "{}".into());
+        // Whole-video analysis
+        self.start_autosync("[]".into(), json, "estimate_motion_from_video".into());
+    }
     pub fn new() -> Self {
         Self {
             preview_resolution: -1,
@@ -340,6 +378,10 @@ impl Controller {
     }
 
     fn load_video(&mut self, url: QUrl, player: QJSValue) {
+        // Cancel any ongoing autosync/estimation and reset UI state before loading a new video
+        self.cancel_flag.store(true, SeqCst);
+        self.sync_in_progress = false;
+        self.sync_in_progress_changed();
         self.stabilizer.clear();
         let url = util::qurl_to_encoded(url.clone());
         let filename = filesystem::get_filename(&url);
@@ -1188,9 +1230,9 @@ impl Controller {
         self.chart_data_changed();
         self.request_recompute();
     }
-    fn load_motion_direction_params(&mut self, params_json: QString) {
+    fn load_motion_direction_params(&mut self, params_json: QString, enabled: bool) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&params_json.to_string()) {
-            self.stabilizer.load_motion_direction_params(&json);
+            self.stabilizer.load_motion_direction_params(&json, enabled);
             self.chart_data_changed();
             self.request_recompute();
         }
@@ -1632,6 +1674,46 @@ impl Controller {
         let y_norm = ((cy - dy) / max_range) + 0.5;
 
         serde_json_to_qt_array(&serde_json::json!([x_norm, y_norm, lat, lon]))
+    }
+
+    fn get_gps_current_latlon(&self, timestamp_us: i64) -> QJsonArray {
+        use crate::util::serde_json_to_qt_array;
+
+        let track_opt = self.stabilizer.get_gps_track();
+        let Some(track) = track_opt.as_ref() else { return QJsonArray::default(); };
+        let n = track.len();
+        if n == 0 { return QJsonArray::default(); }
+
+        let t_ms = timestamp_us as f64 / 1000.0;
+        let off_ms = self.stabilizer.get_gps_offset_ms();
+        let t_s = (t_ms - off_ms) / 1000.0; // convert to GPSTrack absolute seconds
+
+        // Binary search for interval
+        let mut lo = 0usize;
+        let mut hi = n - 1;
+        if t_s <= track.time[0] {
+            lo = 0; hi = 0;
+        } else if t_s >= track.time[n - 1] {
+            lo = n - 1; hi = n - 1;
+        } else {
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                if track.time[mid] <= t_s { lo = mid; } else { hi = mid; }
+            }
+        }
+
+        let (lat, lon) = if lo == hi {
+            (track.lat[lo], track.lon[lo])
+        } else {
+            let t0 = track.time[lo];
+            let t1 = track.time[hi];
+            let frac = ((t_s - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            let lat = track.lat[lo] + (track.lat[hi] - track.lat[lo]) * frac;
+            let lon = track.lon[lo] + (track.lon[hi] - track.lon[lo]) * frac;
+            (lat, lon)
+        };
+
+        serde_json_to_qt_array(&serde_json::json!([lat, lon]))
     }
 
     fn has_gps(&self) -> bool {

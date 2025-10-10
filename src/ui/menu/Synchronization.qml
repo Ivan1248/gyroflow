@@ -68,10 +68,11 @@ MenuItem {
         }
     }
     function getSettings(): var {
+        const s = controller.motion_estimation_settings || {};
         return {
             // optical flow and relative pose estimation methods from "Motion data" section
-            "of_method":          window.motionData.ofMethod,
-            "pose_method":        window.motionData.poseMethodString,
+            "of_method":          (s.of_method !== undefined ? s.of_method : 2),
+            "pose_method":        (s.pose_method || "EssentialLMEDS"),
             "every_nth_frame":    everyNthFrame.value,
             "initial_offset":     initialOffset.value,
             "initial_offset_inv": checkNegativeInitialOffset.checked,

@@ -114,6 +114,22 @@ struct Opts {
     /// print app version
     #[argh(switch)]
     version: bool,
+
+    /// GPX track file path to load
+    #[argh(option)]
+    input_gpx: Option<String>,
+
+    /// export synchronized GPX file to specified path
+    #[argh(option)]
+    export_gpx: Option<String>,
+
+    /// estimate motion from video (necessary for motion direction alignment)
+    #[argh(switch)]
+    estimate_motion: bool,
+
+    /// GPS settings JSON, e.g. "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'sample_rate_hz': 10 }"
+    #[argh(option)]
+    gps_settings: Option<String>,
 }
 
 pub fn will_run_in_console() -> bool {
@@ -340,6 +356,24 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                         }
                     }
                     if ok {
+                        // Export synchronized GPX if requested
+                        if let Some(ref export_gpx_path) = opts.export_gpx {
+                            if let Some(stab) = queue.get_stab_for_job(*job_id) {
+                                log::info!("[{:08x}] Exporting synchronized GPX to: {}", job_id, export_gpx_path);
+                                let gps = stab.gps.read();
+                                if let Some(track) = gps.track.as_ref() {
+                                    let video_start_time = stab.params.read().video_created_at.unwrap_or(0) as f64;
+                                    let offset = gps.offset_ms / 1000.0;
+                                    match gyroflow_core::gps::save_gpx_file(export_gpx_path, video_start_time + offset, track) {
+                                        Ok(_) => log::info!("[{:08x}] GPX exported successfully", job_id),
+                                        Err(e) => log::error!("[{:08x}] Failed to export GPX: {}", job_id, e),
+                                    }
+                                } else {
+                                    log::warn!("[{:08x}] No GPS track loaded, cannot export GPX", job_id);
+                                }
+                            }
+                        }
+                        
                         pb.set_message(format!("\x1B[1;32m{}\x1B[0m", pb.message())); // Green
                         if opts.stdout_progress {
                             println!("[{:08x}] Rendering completed: {}", job_id, pb.message());
@@ -453,6 +487,92 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                     let stab = queue.get_stab_for_job(*job_id).unwrap();
                     stab.load_lens_profile(file).expect("Loading lens profile");
                     stab.recompute_blocking();
+                }
+
+                // Apply GPS settings if provided
+                if let Some(ref gps_json) = opts.gps_settings {
+                    let stab = queue.get_stab_for_job(*job_id).unwrap();
+                    let parsed = gps_json.replace('\'', "\"");
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&parsed) {
+                        if let Some(mode) = val.get("sync_mode") {
+                            // Accept: "off"|0, "auto"|1, "manual"|2
+                            let m = if let Some(s) = mode.as_str() { s.to_ascii_lowercase() } else { String::new() };
+                            let mode_i = if let Some(i) = mode.as_i64() { i as i32 } else if m == "off" { 0 } else if m == "auto" { 1 } else if m == "manual" { 2 } else { -1 };
+                            if mode_i >= 0 { stab.set_gps_sync_mode(mode_i); }
+                        }
+                        if let Some(v) = val.get("use_processed_motion").and_then(|x| x.as_bool()) { stab.set_gps_use_processed_motion(v); }
+                        if let Some(v) = val.get("speed_threshold").and_then(|x| x.as_f64()) { stab.set_gps_speed_threshold(v); }
+                        if let Some(v) = val.get("max_time_offset_s").and_then(|x| x.as_f64()) { stab.set_gps_max_time_offset(v); }
+                        if let Some(v) = val.get("sample_rate_hz").and_then(|x| x.as_f64()) {
+                            // Not exposed via facade yet; ignore or add when available
+                            let _ = v; // placeholder
+                        }
+                    } else {
+                        log::error!("[{:08x}] Invalid JSON for --gps-settings", job_id);
+                    }
+                }
+
+                // Load GPX file if provided
+                if let Some(ref gpx_path) = opts.input_gpx {
+                    log::info!("[{:08x}] Loading GPX file: {}", job_id, gpx_path);
+                    let stab = queue.get_stab_for_job(*job_id).unwrap();
+                    let video_creation_time = stab.params.read().video_created_at.unwrap_or(0) as f64;
+                    match gyroflow_core::gps::parse_gpx_file(gpx_path) {
+                        Ok(track) => {
+                            stab.set_gpx_track(track.with_subtracted_time(video_creation_time));
+                            log::info!("[{:08x}] GPX loaded successfully with {} points", job_id, track.len());
+                        }
+                        Err(e) => {
+                            log::error!("[{:08x}] Failed to load GPX file {}: {}", job_id, gpx_path, e);
+                        }
+                    }
+                }
+
+                // Trigger motion estimation if requested, or when motion direction alignment is enabled via preset and vectors are missing
+                {
+                    let stab = queue.get_stab_for_job(*job_id).unwrap();
+                    let motion_dir_enabled = stab.smoothing.read()
+                        .get_motion_direction_status_json()
+                        .as_array()
+                        .map_or(false, |arr| !arr.is_empty());
+
+                    if opts.estimate_motion || motion_dir_enabled {
+                        log::info!("[{:08x}] Estimating motion from video...", job_id);
+
+                        let input_file = stab.input_file.read().clone();
+                        let job_id_copy = *job_id;
+                        let stdout_progress = opts.stdout_progress;
+                        rendering::render_queue::RenderQueue::do_motion_estimation(
+                            stab.clone(),
+                            move |progress| {
+                                if stdout_progress {
+                                    println!("[{:08x}] Motion estimation progress: {:.1}%", job_id_copy, progress * 100.0);
+                                }
+                            },
+                            &input_file,
+                            move |err| log::error!("[{:08x}] Motion estimation error: {}", job_id_copy, err.0),
+                            720  // processing resolution
+                        );
+                        log::info!("[{:08x}] Motion estimation completed", job_id);
+
+                        // Recompute after motion estimation
+                        stab.recompute_blocking();
+                    }
+                }
+
+                // If we have a GPX track, compute GPS synchronization (time offset) now,
+                // so that GPX export (and any GPS-dependent features) use the final offset.
+                {
+                    let stab = queue.get_stab_for_job(*job_id).unwrap();
+                    let has_track = stab.gps.read().track.is_some();
+                    if has_track {
+                        log::info!("[{:08x}] Computing GPS synchronization...", job_id);
+                        // Uses current settings: use_processed_motion, speed_threshold, sample_rate_hz, etc.
+                        let gyro = stab.gyro.read();
+                        stab.gps.write().synchronize_with_gyro(&gyro);
+                        drop(gyro);
+                        log::info!("[{:08x}] GPS synchronization done. Offset(ms) = {:.3}", job_id, stab.gps.read().offset_ms);
+                    }
                 }
 
                 let fname = queue.get_job_output_filename(*job_id).to_string();

@@ -83,7 +83,7 @@ impl MotionDirectionAlignment {
             "description": "Flip backward direction",
             "type": "CheckBox",
             "default": self.flip_backward_dir,
-            "value": if self.flip_backward_dir { 1.0 } else { 0.0 },
+            "value": self.flip_backward_dir,
             "advanced": true
         }])
     }

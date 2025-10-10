@@ -108,14 +108,19 @@ MenuItem {
             horizonPitchSlider.value = lockPitchCb.checked? +stab.horizon_lock_pitch : 0;
             Qt.callLater(updateHorizonLock);
 
-            if (stab.hasOwnProperty("`motion_direction_params`")) {  // TODO: check
-                controller.load_motion_direction_params(JSON.stringify(stab.motion_direction_params));
-                // Update UI with loaded parameters
-                for (const param of stab.motion_direction_params) {
-                    if (param.name === "min_inlier_ratio") mdMinInlier.value = param.value;
-                    else if (param.name === "max_epi_err") mdMaxErr.value = param.value;
-                    else if (param.name === "flip_backward_dir") mdFlipBackward.checked = param.value > 0.5;
-                }
+            // Load motion direction alignment settings
+            const motionDirEnabled = stab.hasOwnProperty("motion_direction_enabled") ? !!stab.motion_direction_enabled : 
+                                     (stab.hasOwnProperty("motion_direction_params") && stab.motion_direction_params.length > 0); // Backward compat
+            const motionDirParams = stab.hasOwnProperty("motion_direction_params") ? stab.motion_direction_params : [];
+            
+            controller.load_motion_direction_params(JSON.stringify(motionDirParams), motionDirEnabled);
+            motionDirCb.cb.checked = motionDirEnabled;
+            
+            // Update UI with loaded parameters
+            for (const param of motionDirParams) {
+                if (param.name === "min_inlier_ratio") mdMinInlier.value = param.value;
+                else if (param.name === "max_epi_err") mdMaxErr.value = param.value;
+                else if (param.name === "flip_backward_dir") mdFlipBackward.checked = param.value > 0.5;
             }
 
             if (stab.hasOwnProperty("video_speed")) videoSpeed.value = +stab.video_speed;

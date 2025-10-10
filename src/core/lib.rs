@@ -1253,8 +1253,8 @@ impl StabilizationManager {
         self.smoothing.write().set_motion_direction_param(name, val);
         self.invalidate_smoothing();
     }
-    pub fn load_motion_direction_params(&self, params_json: &serde_json::Value) {
-        self.smoothing.write().load_motion_direction_from_params(params_json);
+    pub fn load_motion_direction_params(&self, params_json: &serde_json::Value, enabled: bool) {
+        self.smoothing.write().load_motion_direction_from_params(params_json, enabled);
         self.invalidate_smoothing();
     }
     pub fn get_motion_direction_status(&self) -> serde_json::Value {
@@ -1352,7 +1352,7 @@ impl StabilizationManager {
         let gyro = self.gyro.read();
         let params = self.params.read();
 
-        let (smoothing_name, smoothing_params, horizon_amount, horizon_lock, motion_direction_params) = {
+        let (smoothing_name, smoothing_params, horizon_amount, horizon_lock, motion_direction_params, motion_direction_enabled) = {
             let smoothing_lock = self.smoothing.read();
             let smoothing = smoothing_lock.current();
 
@@ -1372,7 +1372,7 @@ impl StabilizationManager {
                 horizon_amount = 0.0;
             }
 
-            (smoothing.get_name(), parameters, horizon_amount, smoothing_lock.horizon_lock.clone(), smoothing_lock.get_motion_direction_params_json())
+            (smoothing.get_name(), parameters, horizon_amount, smoothing_lock.horizon_lock.clone(), smoothing_lock.get_motion_direction_params_json(), smoothing_lock.motion_direction.is_some())
         };
 
         let input_file = self.input_file.read().clone();
@@ -1425,6 +1425,7 @@ impl StabilizationManager {
                 "horizon_lock_pitch":     horizon_lock.horizonpitch,
                 "use_gravity_vectors":    gyro.use_gravity_vectors,
                 "horizon_lock_integration_method": gyro.horizon_lock_integration_method,
+                "motion_direction_enabled": motion_direction_enabled,
                 "motion_direction_params": motion_direction_params,
                 "video_speed":                   params.video_speed,
                 "video_speed_affects_smoothing": params.video_speed_affects_smoothing,

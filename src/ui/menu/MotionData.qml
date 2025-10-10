@@ -31,15 +31,18 @@ MenuItem {
 
     // Function to trigger motion estimation (can be called from other QML files)
     function runMotionEstimation(): void {
-        if (!window.videoArea.vid.loaded || controller.sync_in_progress) {
+        if (!window.videoArea.vid.loaded || controller.sync_in_progress || !controller.can_run_motion_estimation()) {
             return;
         }
-        const settings = {
-            "of_method": ofMethod.currentIndex,
-            "pose_method": ["EssentialLMEDS", "EssentialRANSAC", "Almeida", "EightPoint", "Homography"][poseMethod.currentIndex] || "EssentialLMEDS",
-            "every_nth_frame": everyNthFrame.value
-        };
-        controller.estimate_motion_from_video(JSON.stringify(settings));
+        // Persist current UI settings into controller
+        try {
+            const obj = controller.motion_estimation_settings;
+            obj.of_method = ofMethod.currentIndex;
+            obj.pose_method = ["EssentialLMEDS", "EssentialRANSAC", "Almeida", "EightPoint", "Homography"][poseMethod.currentIndex] || "EssentialLMEDS";
+            obj.every_nth_frame = everyNthFrame.value;
+            controller.motion_estimation_settings = obj;
+        } catch(e) {}
+        controller.run_motion_estimation();
     }
 
     FileDialog {
@@ -745,10 +748,11 @@ MenuItem {
                 model: [qsTr("Off"), qsTr("Auto"), qsTr("Manual")];
                 font.pixelSize: 12 * dpiScale;
                 width: parent.width;
-                currentIndex: controller.gps_sync_mode;
-                onCurrentIndexChanged: {
-                    controller.gps_sync_mode = currentIndex;
-                    currentIndex = controller.gps_sync_mode;
+                Component.onCompleted: currentIndex = controller.gps_sync_mode;
+                onCurrentIndexChanged: controller.gps_sync_mode = currentIndex;
+                Connections {
+                    target: controller;
+                    function onGps_changed() { gpsSyncMode.currentIndex = controller.gps_sync_mode; }
                 }
             }
         }
@@ -837,7 +841,7 @@ MenuItem {
                 
                 let t = qsTr("GPS offset: %1 s").arg(off.toFixed(2));
                 t += qsTr(", anchor: %1").arg(anchor);
-                t += qsTr(", overlap: %1%").arg(overlap.toFixed(3));
+                t += qsTr(", overlap: %1").arg(overlap.toFixed(2));
                 
                 if (overlap <= 0.0) {
                     t += " — " + qsTr("No overlap; relative timeline");

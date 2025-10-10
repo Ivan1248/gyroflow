@@ -92,8 +92,6 @@ impl Default for PoseMethodKind { fn default() -> Self { PoseMethodKind::Essenti
 
 
 impl SyncParams {
-    /// Single source of truth for motion-estimation defaults. Starts from optional lens sync settings
-    /// and adapts for the lightweight estimate_motion_from_video mode.
     pub fn for_motion_estimation(lens_sync_settings: Option<&serde_json::Value>) -> Self {
         let mut p = lens_sync_settings
             .and_then(|v| serde_json::from_value::<Self>(v.clone()).ok())
