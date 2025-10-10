@@ -74,18 +74,9 @@ CLI:
 
 **Step 2: Process video with motion estimation:**
 ```bash
-gyroflow video.mp4 --preset motion_preset.json --estimate-motion
+gyroflow video.mp4 --preset motion_preset.json -p "{'output_path': '/path/to/output.mp4'}"
 ```
-
-The `--estimate-motion` flag triggers video analysis to compute motion direction data. This is required for motion direction alignment to work.
-
-**Step 3 (Optional): Specify output path:**
-```bash
-gyroflow video.mp4 \
-  --preset motion_preset.json \
-  --estimate-motion \
-  -p "{'output_path': '/path/to/output.mp4'}"
-```
+The last argument is optional.
 
 
 ### GPS synchronization (single video)
@@ -126,7 +117,6 @@ gyroflow video.mp4 \
 ```bash
 gyroflow video.mp4 \
   --preset gps_preset.json \
-  --estimate-motion \
   --gpx-file track.gpx \
   --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5 }" \
   -p "{'output_path': '/outputs/stabilized.mp4'}" \
@@ -134,10 +124,9 @@ gyroflow video.mp4 \
 ```
 
 This will:
-1. Estimate motion direction from the video (`--estimate-motion`)
-2. Load the GPX track file (`--gpx-file track.gpx`)
-3. Automatically synchronize the GPS data using the processed motion direction and provided GPS settings
-4. Export the synchronized GPX file (`--export-gpx synchronized.gpx`)
+1. Load the GPX track file (`--gpx-file track.gpx`)
+2. Synchronize the GPS data using the processed motion direction and provided GPS settings
+3. Export the synchronized GPX file (`--export-gpx synchronized.gpx`)
 
 ### Batch processing: motion direction alignment and GPS synchronization
 
