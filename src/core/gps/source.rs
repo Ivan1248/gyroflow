@@ -154,7 +154,7 @@ impl Default for GpsSource {
             offset_ms: 0.0,
             sync_mode: GPSSyncMode::default(),
             use_processed_motion: false,
-            speed_threshold: 1.0,  // Default speed threshold
+            speed_threshold: 1.5,  // Default speed threshold
             sample_rate_hz: 10.0,  // Default sample rate
             max_time_offset_s: 15.0,  // Default max time shift
         }
