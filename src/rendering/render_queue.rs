@@ -1545,6 +1545,7 @@ impl RenderQueue {
     pub fn apply_to_all(&mut self, data: String, additional_data: String, to_job_id: u32) {
         ::log::debug!("Applying preset {}", &data);
         let data_parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(&data);
+        if data_parsed.is_err() { ::log::error!("RenderQueue: preset JSON parse error: {:?}", data_parsed.as_ref().err()); }
         let mut new_output_options = None;
         if let Ok(obj) = &data_parsed {
             if let Some(output) = obj.get("output") {
@@ -1565,6 +1566,13 @@ impl RenderQueue {
             if to_job_id > 0 && *job_id != to_job_id { continue; }
             if job.queue_index < q.row_count() as usize {
                 let mut itm = q[job.queue_index].clone();
+
+                // If the job is in Error due to existing output file, reset to Queued to apply preset
+                let err_str = itm.error_string.to_string();
+                if itm.status == JobStatus::Error && err_str.starts_with("file_exists:") {
+                    itm.status = JobStatus::Queued;
+                }
+
                 if itm.status == JobStatus::Queued {
                     let mut sync_options = serde_json::Value::default();
                     if let Ok(additional_data) = serde_json::from_str(&additional_data) as serde_json::Result<serde_json::Value> {

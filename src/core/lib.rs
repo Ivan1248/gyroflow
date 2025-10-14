@@ -1808,6 +1808,15 @@ impl StabilizationManager {
                         Some(())
                     })();
                 }
+
+                // Handle motion direction settings (avoid re-locking self.smoothing)
+                if let Some(motion_direction_enabled) = obj.get("motion_direction_enabled").and_then(|x| x.as_bool()) {
+                    let default_params = serde_json::Value::Array(vec![]);
+                    let motion_direction_params = obj.get("motion_direction_params").unwrap_or(&default_params);
+                    // Use the currently-held `smoothing` write guard to avoid deadlock
+                    smoothing.load_motion_direction_from_params(motion_direction_params, motion_direction_enabled);
+                }
+
                 if let Some(horizon_amount) = obj.get("horizon_lock_amount").and_then(|x| x.as_f64()) {
                     if let Some(horizon_roll) = obj.get("horizon_lock_roll").and_then(|x| x.as_f64()) {
                         let horizon_pitch_enabled = obj.get("horizon_lock_pitch_enabled").and_then(|x| x.as_bool()).unwrap_or(false);

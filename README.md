@@ -59,7 +59,7 @@ CLI:
   "version": 2,
   "stabilization": {
     "fov": 3.222,
-    "method": "Plain3D",
+    "method": "Plain 3D",
     "smoothing_params": [
       {"name": "time_constant", "value": 1.0}
     ],
