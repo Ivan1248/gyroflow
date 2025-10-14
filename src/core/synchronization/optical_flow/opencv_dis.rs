@@ -79,7 +79,7 @@ impl OpticalFlowTrait for OFOpenCVDis {
 
                 // Debug: Save frames with DIS centers and displacement vectors if environment variable is set
                 if let Ok(debug_dir) = std::env::var("GYROFLOW_DEBUG_DIS") {
-                    if let Err(e) = std::fs::create_dir_all(debug_dir) {
+                    if let Err(e) = std::fs::create_dir_all(&debug_dir) {
                         log::error!("Failed to create debug directory: {}", e);
                     }
                     
