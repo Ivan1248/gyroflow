@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::cell::RefCell;
 use std::sync::atomic::{ AtomicBool, AtomicUsize, Ordering::SeqCst };
 use std::collections::{ BTreeMap, BTreeSet, HashSet };
+use gyroflow_core::gps::sync::{ GpsSyncSettings, GpsSyncResult };
 use std::str::FromStr;
 
 use qml_video_rs::video_item::MDKVideoItem;
@@ -325,12 +326,14 @@ pub struct Controller {
     gps_sync_mode: qt_property!(i32; READ get_gps_sync_mode WRITE set_gps_sync_mode NOTIFY gps_changed),
     gps_offset_ms: qt_property!(f64; READ get_gps_offset_ms WRITE set_gps_offset_ms NOTIFY gps_changed),
     gps_use_processed_motion: qt_property!(bool; READ get_gps_use_processed_motion WRITE set_gps_use_processed_motion NOTIFY gps_changed),
-    gps_speed_threshold: qt_property!(f64; READ get_gps_speed_threshold WRITE set_gps_speed_threshold NOTIFY gps_changed),
-    gps_max_time_offset: qt_property!(f64; READ get_gps_max_time_offset WRITE set_gps_max_time_offset NOTIFY gps_changed),
     has_gps: qt_property!(bool; READ has_gps NOTIFY chart_data_changed),
-    get_gps_sync_quality: qt_method!(fn(&self) -> f64),
     get_gps_anchor: qt_method!(fn(&self) -> QString),
     get_gps_overlap: qt_method!(fn(&self) -> f64),
+    get_gps_correlation: qt_method!(fn(&self) -> f64),
+    get_gps_sync_settings: qt_method!(fn(&self) -> QVariant),
+    set_gps_sync_settings: qt_method!(fn(&mut self, settings: QVariant)),
+    get_gps_sync_result: qt_method!(fn(&self) -> QVariant),
+    gps_info_text: qt_property!(QString; READ get_gps_info_text NOTIFY gps_changed),
     get_gps_polyline: qt_method!(fn(&self, max_points: usize) -> QJsonArray),
     get_gps_current_xy: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
     get_gps_current_latlon: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
@@ -626,7 +629,7 @@ impl Controller {
                         let gps_track = self.stabilizer.get_gps_track();
                         let gps_offset_ms = self.stabilizer.get_gps_offset_ms();
                         let gps_use_processed_motion = self.stabilizer.get_gps_use_processed_motion();
-                        let gps_speed_threshold = self.stabilizer.get_gps_speed_threshold();
+                        let gps_speed_threshold = self.stabilizer.get_gps_sync_settings().speed_threshold;
                         chart.setFromGyroSource(&gyro, &params, &keyframes, gps_track, gps_offset_ms, gps_use_processed_motion, gps_speed_threshold, &series);
                         return true;
                     }
@@ -1779,33 +1782,60 @@ impl Controller {
     fn set_gps_sync_mode(&self, mode: i32) { 
         self.stabilizer.set_gps_sync_mode(mode);
         self.recompute_gps_sync();
-        self.gps_changed();
     }
-    fn get_gps_sync_quality(&self) -> f64 { self.stabilizer.get_gps_sync_quality() }
     fn get_gps_anchor(&self) -> QString { QString::from(self.stabilizer.get_gps_anchor()) }
     fn get_gps_overlap(&self) -> f64 { self.stabilizer.get_gps_overlap() }
+    fn get_gps_correlation(&self) -> f64 { self.stabilizer.get_gps_correlation().unwrap_or(f64::NAN) }
+    fn get_gps_sync_settings(&self) -> QVariant {
+        let settings = self.stabilizer.get_gps_sync_settings();
+        QString::from(serde_json::to_string(&settings).unwrap_or_default()).into()
+    }
+    fn set_gps_sync_settings(&mut self, settings: QVariant) {
+        if let Some(settings_str) = settings.to_qstring().to_string().into() {
+            if let Ok(settings) = serde_json::from_str::<GpsSyncSettings>(&settings_str) {
+                self.stabilizer.set_gps_sync_settings(settings);
+                self.recompute_gps_sync();
+            }
+        }
+    }
+    fn get_gps_sync_result(&self) -> QVariant {
+        if let Some(result) = self.stabilizer.get_gps_sync_result() {
+            QString::from(serde_json::to_string(&result).unwrap_or_default()).into()
+        } else {
+            QVariant::default()
+        }
+    }
+    fn get_gps_info_text(&self) -> QString {
+        let sync_mode = self.stabilizer.get_gps_sync_mode();
+        let mode_str = match sync_mode {
+            0 => "Off",
+            1 => "Auto",
+            2 => "Manual",
+            _ => "Off",
+        };
+
+        let anchor = self.stabilizer.get_gps_anchor();
+        let overlap = self.stabilizer.get_gps_overlap();
+        let offset_ms = self.stabilizer.get_gps_offset_ms();
+        let offset_s = offset_ms / 1000.0;
+
+        let mut text = format!("GPS offset: {:.2} s, anchor: {}, overlap: {:.2}",
+                              offset_s, anchor, overlap);
+
+        if let Some(sync_result) = self.stabilizer.get_gps_sync_result() {
+            text.push_str(&format!(", correlation: {:.3}, L1 similarity: {:.3}",
+                                  sync_result.correlation, sync_result.similarity));
+        }
+        if overlap <= 0.0 {
+            text.push_str(" — No overlap; relative timeline");
+        }
+        QString::from(text)
+    }
     fn get_gps_use_processed_motion(&self) -> bool { self.stabilizer.get_gps_use_processed_motion() }
-    fn get_gps_speed_threshold(&self) -> f64 { 
-        self.stabilizer.get_gps_speed_threshold() 
-    }
-    fn set_gps_speed_threshold(&self, threshold: f64) {
-        self.stabilizer.set_gps_speed_threshold(threshold);
-        self.recompute_gps_sync();
-        self.gps_changed();
-    }
-    fn get_gps_max_time_offset(&self) -> f64 { 
-        self.stabilizer.get_gps_max_time_offset() 
-    }
-    fn set_gps_max_time_offset(&self, shift: f64) {
-        self.stabilizer.set_gps_max_time_offset(shift);
-        self.recompute_gps_sync();
-        self.gps_changed();
-    }
-    fn set_gps_use_processed_motion(&self, use_processed_motion: bool) { 
+    fn set_gps_use_processed_motion(&self, use_processed_motion: bool) {
         self.stabilizer.set_gps_use_processed_motion(use_processed_motion);
         // Auto-recompute GPS sync with new motion setting
         self.recompute_gps_sync();
-        self.gps_changed();
     }
     
     fn mesh_at_frame(&self, frame: usize) -> QVariantList {

@@ -774,6 +774,7 @@ Item {
                     Action { checkable: true; checked: chart.viewMode === 2; text: qsTr("Magnetometer");  onTriggered: root.setDisplayMode(2); }
                     Action { checkable: true; checked: chart.viewMode === 3; text: qsTr("Quaternions");   onTriggered: root.setDisplayMode(3); }
                     Action { checkable: true; checked: chart.viewMode === 4; text: qsTr("GPS");   onTriggered: root.setDisplayMode(4); }
+                    Action { checkable: true; checked: chart.viewMode === 5; text: qsTr("GPS - processed course"); onTriggered: root.setDisplayMode(5); }
                 }
                 Component.onCompleted: {
                     if (!isCalibrator) {

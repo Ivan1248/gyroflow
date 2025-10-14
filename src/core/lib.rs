@@ -32,6 +32,7 @@ use keyframes::*;
 use parking_lot::{ RwLock, RwLockUpgradableReadGuard };
 use nalgebra::Vector4;
 use gyro_source::{ GyroSource, Quat64, TimeQuat, TimeVec };
+use gps::sync::{ GpsSyncSettings, GpsSyncResult };
 use stabilization_params::{ ReadoutDirection, StabilizationParams };
 use lens_profile::LensProfile;
 use lens_profile_database::LensProfileDatabase;
@@ -163,8 +164,6 @@ impl StabilizationManager {
     pub fn get_gpx_summary(&self) -> serde_json::Value {
         self.gps.read().summary_json(self.params.read().duration_ms)
     }
-    pub fn get_gps_offset_ms(&self) -> f64 { self.gps.read().offset_ms }
-    pub fn set_gps_offset_ms(&self, offset_ms: f64) { self.gps.write().offset_ms = offset_ms; }
     pub fn clear_gps_data(&self) { self.gps.write().clear_data(); }
     pub fn get_gps_use_processed_motion(&self) -> bool { self.gps.read().use_processed_motion }
     pub fn set_gps_use_processed_motion(&self, use_processed_motion: bool) { self.gps.write().use_processed_motion = use_processed_motion; }
@@ -174,6 +173,12 @@ impl StabilizationManager {
     pub fn set_gps_sync_mode(&self, mode: i32) {
         use crate::gps::source::GPSSyncMode as M;
         self.gps.write().set_sync_mode(match mode { 1 => M::Auto, 2 => M::Manual, _ => M::Off });
+        self.gps.write().compute_correlation_with_offset(&self.gyro.read());
+    }
+    pub fn get_gps_offset_ms(&self) -> f64 { self.gps.read().offset_ms }
+    pub fn set_gps_offset_ms(&self, offset_ms: f64) { 
+        self.gps.write().offset_ms = offset_ms; 
+        self.gps.write().compute_correlation_with_offset(&self.gyro.read()); 
     }
     pub fn get_gps_anchor(&self) -> String {
         use crate::gps::source::TimeAlignment;
@@ -195,16 +200,19 @@ impl StabilizationManager {
             0.0
         }
     }
-    pub fn get_gps_sync_quality(&self) -> f64 { 
-        // Quality could be based on overlap ratio, RMS error, etc.
-        // For now, return overlap ratio as a simple quality metric
-        self.get_gps_overlap()
+    pub fn get_gps_correlation(&self) -> Option<f64> {
+        self.gps.read().get_correlation()
+    }
+    pub fn get_gps_sync_settings(&self) -> GpsSyncSettings {
+        self.gps.read().get_sync_settings()
+    }
+    pub fn set_gps_sync_settings(&self, settings: GpsSyncSettings) {
+        self.gps.write().set_sync_settings(settings);
+    }
+    pub fn get_gps_sync_result(&self) -> Option<GpsSyncResult> {
+        self.gps.read().get_sync_result()
     }
     pub fn get_gps_track(&self) -> Option<crate::gps::GPSTrack> { self.gps.read().track.clone() }
-    pub fn get_gps_speed_threshold(&self) -> f64 { self.gps.read().get_speed_threshold() }
-    pub fn set_gps_speed_threshold(&self, threshold: f64) { self.gps.write().set_speed_threshold(threshold); }
-    pub fn get_gps_max_time_offset(&self) -> f64 { self.gps.read().get_max_time_offset() }
-    pub fn set_gps_max_time_offset(&self, shift: f64) { self.gps.write().set_max_time_offset(shift); }
     
     pub fn init_from_video_data(&self, duration_ms: f64, fps: f64, frame_count: usize, video_size: (usize, usize)) {
         {

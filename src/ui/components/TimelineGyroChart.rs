@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use gyroflow_core::gps::{ unwrap_angles_deg, resample_linear, GPSTrack };
+use gyroflow_core::gps::sync::preprocess_angular_signal;
 use gyroflow_core::stabilization_params::StabilizationParams;
 use gyroflow_core::keyframes::{ KeyframeManager, KeyframeType };
 use qmetaobject::*;
@@ -28,6 +29,16 @@ struct Series {
     visible: bool,
 }
 
+#[derive(Debug)]
+struct PreparedGpsData {
+    times_u: Vec<f64>,
+    course_unwrapped: Vec<f64>,
+    yaw_unwrapped: Vec<f64>,
+    speed_u: Vec<f64>,
+    course_processed: Vec<f64>,
+    yaw_processed: Vec<f64>,
+}
+
 // We can have:
 // viewMode 0: Gyro only
 // viewMode 0: Gyro + sync results
@@ -36,6 +47,7 @@ struct Series {
 // viewMode 3: Quaternions
 // viewMode 3: Quaternions + smoothed quaternions
 // viewMode 4: GPS (Course/Yaw/Speed)
+// viewMode 5: GPS - processed course (angular rates)
 
 #[derive(Default, QObject)]
 pub struct TimelineGyroChart {
@@ -78,6 +90,8 @@ pub struct TimelineGyroChart {
     gps_yaw: Vec<ChartData<1>>,  // unwrapped
     gps_speed: Vec<ChartData<1>>,
     gps_speed_masking: Vec<ChartData<1>>,  // [masking_ratio] - 0.0 = masked, 1.0 = not masked
+    gps_course_processed: Vec<ChartData<1>>,  // processed GPS course (angular rates)
+    gps_yaw_processed: Vec<ChartData<1>>,     // processed gyro yaw (angular rates)
 }
 
 impl TimelineGyroChart {
@@ -115,41 +129,39 @@ impl TimelineGyroChart {
         self.update();
     }
 
-    fn populate_gps_charts(
-        &mut self,
+    fn prepare_gps_data(
         track: &GPSTrack,
         gyro: &GyroSource,
         offset_ms: f64,
         use_processed_motion: bool,
         video_duration_ms: f64,
-        speed_threshold_mps: f64,
-    ) {
-        if track.time.is_empty() { return; }
+    ) -> Option<PreparedGpsData> {
+        if track.time.is_empty() { return None; }
 
         let course = track.get_course_deg();
         let speed = track.get_speed();
 
         let mut times_ms: Vec<f64> = track.time.iter().map(|t| *t * 1000.0 + offset_ms).collect();
-        if times_ms.is_empty() { return; }
+        if times_ms.is_empty() { return None; }
 
         let mut t0 = 0.0_f64.max(*times_ms.first().unwrap());
         let mut t1 = video_duration_ms.min(*times_ms.last().unwrap());
 
         if t1 <= t0 {
             times_ms = track.time.iter().map(|t| (*t - track.get_start_time().unwrap()) * 1000.0 + offset_ms).collect();
-            if times_ms.is_empty() { return; }
+            if times_ms.is_empty() { return None; }
             t0 = 0.0;
             t1 = video_duration_ms.min(times_ms.last().copied().unwrap_or(0.0).max(0.0));
-            if t1 <= t0 { return; }
+            if t1 <= t0 { return None; }
         }
-        
+
         // Unwrap angles BEFORE resampling to avoid interpolation issues at 360°/0° boundary
         let course_unwrapped_orig = unwrap_angles_deg(&course);
         let sample_rate_hz = 10.0; // TODO: Should be passed as parameter from GpsSource
         let (times_u, course_unwrapped) = resample_linear(&times_ms, &course_unwrapped_orig, t0, t1, sample_rate_hz);
         let (_, speed_u) = resample_linear(&times_ms, &speed, t0, t1, sample_rate_hz);
 
-        if times_u.is_empty() { return; }
+        if times_u.is_empty() { return None; }
 
         let yaw_raw: Vec<f64> = times_u.iter().map(|t| {
             let (_r, _p, yaw) = if use_processed_motion {
@@ -162,19 +174,83 @@ impl TimelineGyroChart {
 
         let yaw_unwrapped = unwrap_angles_deg(&yaw_raw);
 
-        for (t, v) in times_u.iter().zip(course_unwrapped.iter()) {
-            self.gps_course.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
-        }
-        for (t, v) in times_u.iter().zip(yaw_unwrapped.iter()) {
-            self.gps_yaw.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
-        }
-        for (t, v) in times_u.iter().zip(speed_u.iter()) {
-            self.gps_speed.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
-        }
-        
-        for (t, speed) in times_u.iter().zip(speed_u.iter()) {
+        // Preprocess signals exactly like synchronization does
+        let course_processed = preprocess_angular_signal(&course_unwrapped, sample_rate_hz);
+        let yaw_processed = preprocess_angular_signal(&yaw_unwrapped, sample_rate_hz);
+
+        Some(PreparedGpsData {
+            times_u,
+            course_unwrapped,
+            yaw_unwrapped,
+            speed_u,
+            course_processed,
+            yaw_processed,
+        })
+    }
+
+    fn populate_gps_speed_masking(&mut self, data: &PreparedGpsData, speed_threshold_mps: f64) {
+        for (t, speed) in data.times_u.iter().zip(data.speed_u.iter()) {
             let masking_ratio = if *speed < speed_threshold_mps { 0.0 } else { 1.0 }; // 0.0 = masked, 1.0 = not masked
             self.gps_speed_masking.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [masking_ratio] });
+        }
+    }
+
+    fn populate_gps_raw(&mut self, data: &PreparedGpsData, speed_threshold_mps: f64) {
+        for (t, v) in data.times_u.iter().zip(data.course_unwrapped.iter()) {
+            self.gps_course.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
+        }
+        for (t, v) in data.times_u.iter().zip(data.yaw_unwrapped.iter()) {
+            self.gps_yaw.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
+        }
+        for (t, v) in data.times_u.iter().zip(data.speed_u.iter()) {
+            self.gps_speed.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
+        }
+
+        self.populate_gps_speed_masking(data, speed_threshold_mps);
+    }
+
+    fn populate_gps_processed(&mut self, data: &PreparedGpsData, speed_threshold_mps: f64) {
+        for (t, v) in data.times_u.iter().zip(data.course_processed.iter()) {
+            self.gps_course_processed.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
+        }
+        for (t, v) in data.times_u.iter().zip(data.yaw_processed.iter()) {
+            self.gps_yaw_processed.push(ChartData { timestamp_us: (*t * 1000.0).round() as i64, values: [*v] });
+        }
+
+        self.populate_gps_speed_masking(data, speed_threshold_mps);
+    }
+
+    fn center_and_normalize_gps(
+        course_data: &mut Vec<ChartData<1>>,
+        yaw_data: &mut Vec<ChartData<1>>,
+        speed_data: Option<&mut Vec<ChartData<1>>>,
+    ) {
+        if course_data.is_empty() || yaw_data.is_empty() {
+            return;
+        }
+
+        // Calculate means for centering
+        let course_mean = course_data.iter().map(|x| x.values[0]).sum::<f64>() / course_data.len() as f64;
+        let yaw_mean = yaw_data.iter().map(|x| x.values[0]).sum::<f64>() / yaw_data.len() as f64;
+        let center_offset = course_mean - yaw_mean;
+
+        // Center yaw around course
+        for yaw_data_point in yaw_data.iter_mut() {
+            yaw_data_point.values[0] += center_offset;
+        }
+
+        // Normalize both to same scale
+        let max_abs = |data: &Vec<ChartData<1>>| data.iter().map(|x| x.values[0].abs()).fold(0.0, f64::max);
+        let max_angle = max_abs(course_data).max(max_abs(yaw_data));
+        let _ = Self::normalize_height(course_data, Some(max_angle));
+        let _ = Self::normalize_height(yaw_data, Some(max_angle));
+
+        if let Some(speed_data) = speed_data {
+            if !speed_data.is_empty() {
+                let max_speed = speed_data.iter().map(|x| x.values[0]).fold(0.0, f64::max);
+                // Speeds are scaled to match the angle range [0..360)
+                let _ = Self::normalize_height(speed_data, Some(max_speed * 1.0f64.max(max_angle / 360.0)));
+            }
         }
     }
 
@@ -501,13 +577,29 @@ impl TimelineGyroChart {
                 }
                 add_quats(&org_smoothed_quats, &mut self.smoothed_quats);
             }
-            if self.viewMode == 4 {
+            if self.viewMode == 4 || self.viewMode == 5 {
+                // Clear appropriate data structures
                 self.gps_course.clear();
                 self.gps_yaw.clear();
                 self.gps_speed.clear();
                 self.gps_speed_masking.clear();
+                self.gps_course_processed.clear();
+                self.gps_yaw_processed.clear();
+
                 if let Some(track) = gps_track.as_ref() {
-                    self.populate_gps_charts(track, gyro, gps_offset_ms, gps_use_processed_motion, self.duration_ms, gps_speed_threshold);
+                    if let Some(prepared) = Self::prepare_gps_data(track, gyro, gps_offset_ms, gps_use_processed_motion, self.duration_ms) {
+                        match self.viewMode {
+                            4 => {
+                                self.populate_gps_raw(&prepared, gps_speed_threshold);
+                                Self::center_and_normalize_gps(&mut self.gps_course, &mut self.gps_yaw, Some(&mut self.gps_speed));
+                            }
+                            5 => {
+                                self.populate_gps_processed(&prepared, gps_speed_threshold);
+                                Self::center_and_normalize_gps(&mut self.gps_course_processed, &mut self.gps_yaw_processed, None);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
 
@@ -519,30 +611,8 @@ impl TimelineGyroChart {
                     let qmax = Self::normalize_height(&mut self.quats, None);
                     Self::normalize_height(&mut self.smoothed_quats, qmax);
                 },
-                4 => {
-                    if !self.gps_course.is_empty() && !self.gps_yaw.is_empty() {
-                        // Calculate means for centering
-                        let course_mean = self.gps_course.iter().map(|x| x.values[0]).sum::<f64>() / self.gps_course.len() as f64;
-                        let yaw_mean = self.gps_yaw.iter().map(|x| x.values[0]).sum::<f64>() / self.gps_yaw.len() as f64;
-                        let center_offset = course_mean - yaw_mean;
-                        
-                        // Center yaw around course
-                        for yaw_data in self.gps_yaw.iter_mut() {
-                            yaw_data.values[0] += center_offset;
-                        }
-                        
-                        // Normalize both to same scale
-                        let max_abs = |data: &Vec<ChartData<1>>| data.iter().map(|x| x.values[0].abs()).fold(0.0, f64::max);
-                        let max_angle = max_abs(&self.gps_course).max(max_abs(&self.gps_yaw));
-                        let _ = Self::normalize_height(&mut self.gps_course, Some(max_angle));
-                        let _ = Self::normalize_height(&mut self.gps_yaw, Some(max_angle));
-
-                        if !self.gps_speed.is_empty() {
-                            let max_speed = self.gps_speed.iter().map(|x| x.values[0]).fold(0.0, f64::max);
-                            // Speeds are scaled to to match the angle range [0..360)
-                            let _ = Self::normalize_height(&mut self.gps_speed, Some(max_speed * 1.0f64.max(max_angle / 360.0)));
-                        }
-                    }
+                4 | 5 => {
+                    // GPS normalization is handled above in the population logic
                 },
                 _ => { }
             }
@@ -631,6 +701,12 @@ impl TimelineGyroChart {
                     self.series[0].data = Self::get_serie_vector(&self.gps_course, 0); // course deg
                     self.series[1].data = Self::get_serie_vector(&self.gps_yaw, 0);    // imu yaw deg
                     self.series[2].data = Self::get_serie_vector(&self.gps_speed, 0);  // speed m/s
+                    self.series[3].data.clear();
+                }
+                5 => { // GPS - processed course (angular rates)
+                    self.series[0].data = Self::get_serie_vector(&self.gps_course_processed, 0); // course rates
+                    self.series[1].data = Self::get_serie_vector(&self.gps_yaw_processed, 0);    // imu yaw rates
+                    self.series[2].data.clear(); // no speed in processed mode
                     self.series[3].data.clear();
                 }
                 _ => panic!("Invalid view mode")

@@ -2,8 +2,9 @@
 // Copyright © 2022 Ivan Grubišić <ivan.grubisic at gmail>
 
 use super::data::GPSTrack;
+use super::sync::GpsSyncResult;
 use super::processing::{resample_linear, unwrap_angles_deg};
-use super::sync::{synchronize_gps_gyro, sample_gyro_yaw_at_times, GpsSyncSettings};
+use super::sync::{synchronize_gps_gyro, sample_gyro_yaw_at_times, GpsSyncSettings, preprocess_angular_signal, signal_pearson_correlation};
 use crate::gyro_source::GyroSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -139,12 +140,11 @@ pub struct GpsSource {
     // computed state
     pub track: Option<GPSTrack>,  // .time in seconds since video creation time
     pub offset_ms: f64,  // setting in case of manual offset
+    pub sync_result: Option<GpsSyncResult>,  // Full synchronization result
     // settings
     pub sync_mode: GPSSyncMode,
     pub use_processed_motion: bool,
-    pub speed_threshold: f64,  // Speed threshold for masking (m/s)
-    pub sample_rate_hz: f64,  // GPS synchronization sample rate (Hz)
-    pub max_time_offset_s: f64,  // Maximum time shift for GPS sync (seconds)
+    pub sync_settings: GpsSyncSettings,  // Consolidated sync settings
 }
 
 impl Default for GpsSource {
@@ -152,11 +152,10 @@ impl Default for GpsSource {
         Self {
             track: None,
             offset_ms: 0.0,
+            sync_result: None,
             sync_mode: GPSSyncMode::default(),
             use_processed_motion: false,
-            speed_threshold: 1.5,  // Default speed threshold
-            sample_rate_hz: 10.0,  // Default sample rate
-            max_time_offset_s: 15.0,  // Default max time shift
+            sync_settings: GpsSyncSettings::default(),
         }
     }
 }
@@ -165,35 +164,21 @@ impl GpsSource {
     pub fn clear_data(&mut self) {
         self.track = None;
         self.offset_ms = 0.0;
+        self.sync_result = None;
     }
     
     pub fn set_track(&mut self, track: GPSTrack) {
         self.track = Some(track);
         self.offset_ms = 0.0;
-    }
+        self.sync_result = None;
+    }    
     
-    pub fn get_speed_threshold(&self) -> f64 {
-        self.speed_threshold
+    pub fn get_time_offset_range(&self) -> (f64, f64) {
+        self.sync_settings.time_offset_range_s
     }
-    
-    pub fn set_speed_threshold(&mut self, threshold: f64) {
-        self.speed_threshold = threshold;
-    }
-    
-    pub fn get_sample_rate(&self) -> f64 {
-        self.sample_rate_hz
-    }
-    
-    pub fn set_sample_rate(&mut self, rate: f64) {
-        self.sample_rate_hz = rate;
-    }
-    
-    pub fn get_max_time_offset(&self) -> f64 {
-        self.max_time_offset_s
-    }
-    
-    pub fn set_max_time_offset(&mut self, shift: f64) {
-        self.max_time_offset_s = shift;
+
+    pub fn set_time_offset_range(&mut self, range: (f64, f64)) {
+        self.sync_settings.time_offset_range_s = range;
     }
 
     pub fn set_sync_mode(&mut self, mode: GPSSyncMode) {
@@ -201,37 +186,28 @@ impl GpsSource {
             self.sync_mode = mode;
             if matches!(mode, GPSSyncMode::Off) {
                 self.offset_ms = 0.0;
+                self.sync_result = None;
             }
         }
     }
 
-    pub fn synchronize_with_gyro(&mut self, gyro: &GyroSource) {
+    fn synchronize_with_gyro_internal(&mut self, gyro: &GyroSource, settings: &GpsSyncSettings) {
         let track = match self.track.as_ref() {
             Some(t) => t,
             None => return,
         };
 
-        // Step 1: Compute time alignment
         let alignment = TimeAlignment::compute(track, gyro.duration_ms, false, 0.0);
-        if alignment.overlap_ms < 2000.0 { 
-            return;  // Require at least 2s overlap
+        if alignment.overlap_ms < 2000.0 {
+            return;
         }
 
-        // Step 2: Prepare GPS data (unwraps angles before resampling)
-        let prepared = PreparedGpsData::prepare(track, alignment.anchor_time_s, gyro.duration_ms, self.sample_rate_hz);
-        if prepared.times_ms.is_empty() { 
-            return; 
+        let prepared = PreparedGpsData::prepare(track, alignment.anchor_time_s, gyro.duration_ms, self.sync_settings.sample_rate);
+        if prepared.times_ms.is_empty() {
+            return;
         }
 
-        // Step 3: Sample gyro yaw at same timestamps
         let gyro_yaw_deg = sample_gyro_yaw_at_times(gyro, &prepared.times_ms, self.use_processed_motion);
-
-        // Step 4: Synchronize via cross-correlation
-        let settings = GpsSyncSettings {
-            speed_threshold: self.speed_threshold,  // Use field value
-            max_time_offset_s: self.max_time_offset_s,  // Use field value
-            sample_rate: self.sample_rate_hz,  // Use field value
-        };
         if let Some(result) = synchronize_gps_gyro(
             &prepared.course_deg,
             &gyro_yaw_deg,
@@ -239,12 +215,57 @@ impl GpsSource {
             false,  // No scale estimation needed
             &settings,
         ) {
-            self.offset_ms = (result.time_offset_s - alignment.anchor_time_s) * 1000.0;
+            self.offset_ms = (-alignment.anchor_time_s + result.time_offset_s) * 1000.0;
+            self.sync_result = Some(result);
         }
+    }
+
+    pub fn synchronize_with_gyro(&mut self, gyro: &GyroSource) {
+        let settings = self.sync_settings;
+        self.synchronize_with_gyro_internal(gyro, &settings);
     }
 
     pub fn is_enabled(&self) -> bool {
         self.sync_mode != GPSSyncMode::Off
+    }
+
+    pub fn get_correlation(&self) -> Option<f64> {
+        self.sync_result.as_ref().map(|r| r.correlation)
+    }
+
+    /// Get the current synchronization settings as a single struct
+    pub fn get_sync_settings(&self) -> GpsSyncSettings {
+        self.sync_settings
+    }
+
+    /// Set synchronization settings from a single struct
+    pub fn set_sync_settings(&mut self, settings: GpsSyncSettings) {
+        self.sync_settings = settings;
+    }
+
+    /// Get the full synchronization result (if available)
+    pub fn get_sync_result(&self) -> Option<GpsSyncResult> {
+        self.sync_result
+    }
+
+    /// Compute correlation from prepared signals
+    fn compute_correlation_from_signals(&self, course_deg: &[f64], gyro_yaw_deg: &[f64], speed_mps: &[f64]) -> f64 {
+        // Preprocess signals exactly like synchronization does
+        let course_processed = preprocess_angular_signal(course_deg, self.sync_settings.sample_rate);
+        let yaw_processed = preprocess_angular_signal(gyro_yaw_deg, self.sync_settings.sample_rate);
+
+        // Create speed mask for correlation computation
+        let speed_mask: Vec<bool> = speed_mps.iter().map(|&speed| speed >= self.sync_settings.speed_threshold).collect();
+
+        // Compute correlation directly
+        signal_pearson_correlation(&course_processed, &yaw_processed, Some(&speed_mask))
+    }
+
+    /// Compute correlation with the current offset setting
+    pub fn compute_correlation_with_offset(&mut self, gyro: &GyroSource) {
+        let mut settings = self.sync_settings;
+        settings.time_offset_range_s = (self.offset_ms / 1000.0, self.offset_ms / 1000.0);
+        self.synchronize_with_gyro_internal(gyro, &settings);
     }
 
     pub fn summary_json(&self, video_duration_ms: f64) -> serde_json::Value {
