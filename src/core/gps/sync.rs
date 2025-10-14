@@ -339,8 +339,7 @@ where
         let mask_slice = mask_a.map(|m| &m[..len]);
 
         let correlation = similarity_fn(a_slice, b_slice, mask_slice);
-        // print offset and correlation
-        println!("offset: {:.3}, correlation: {:.3}", offset as f64 / sample_rate, correlation);
+        // println!("offset: {:.3}, correlation: {:.3}", offset as f64 / sample_rate, correlation);
         if correlation > best_correlation {
             best_correlation = correlation;
             best_offset = offset;
