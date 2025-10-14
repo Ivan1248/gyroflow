@@ -53,28 +53,25 @@ GUI:
 
 CLI:
 
-**Step 1: Create a preset file** (e.g., `motion_preset.json`):
+**Step 1: Create a preset file** (e.g., `preset.json`):
 ```json
 {
   "version": 2,
   "stabilization": {
     "fov": 3.222,
     "method": "Plain 3D",
-    "smoothing_params": [
-      {"name": "time_constant", "value": 1.0}
-    ],
+    "smoothing_params": [{"name": "time_constant", "value": 1.0}],
     "horizon_lock_amount": 1.0,
     "motion_direction_enabled": true,
-    "motion_direction_params": [
-      {"name": "flip_backward_dir", "value": false}
-    ]
-  }
+    "motion_direction_params": [{"name": "flip_backward_dir", "value": false}]
+  },
+  "output": {"width": 960, "height": 540}
 }
 ```
 
 **Step 2: Process video with motion estimation:**
 ```bash
-gyroflow video.mp4 --preset motion_preset.json -p "{'output_path': '/path/to/output.mp4'}"
+gyroflow video.mp4 --preset preset.json -p "{'output_path': '/path/to/output.mp4'}"
 ```
 The last argument is optional.
 
@@ -98,26 +95,25 @@ The last argument is optional.
 
 **CLI:**
 
-**Step 1: Create a preset file** (e.g., `gps_preset.json`):
+**Step 1: Create a preset file** (e.g., `preset.json`):
+The preset file can be the same as before, but only the following is necessary for better GPS synchronization:
 ```json
 {
   "version": 2,
   "stabilization": {
-    "method": "Plain3D",
-    "smoothing_params": [
-      {"name": "time_constant", "value": 1.0}
-    ],
+    "method": "Plain 3D",
+    "smoothing_params": [{"name": "time_constant", "value": 1.0}],
     "motion_direction_enabled": true,
   }
 }
 ```
 
-**Step 2: Process video with GPS synchronization:**
+**Step 2: Process video and synchronize the GPS track with the video:**
 **Specifying output paths:**
 ```bash
 gyroflow video.mp4 \
-  --preset gps_preset.json \
-  --gpx-file track.gpx \
+  --preset preset.json \  # should have motion_direction_enabled and "Plain 3D" smoothing
+  --input-gpx track.gpx \
   --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'max_time_offset_s': 5.0 }" \
   -p "{'output_path': '/outputs/stabilized.mp4'}" \
   --export-gpx /outputs/synchronized.gpx \
@@ -125,7 +121,7 @@ gyroflow video.mp4 \
 ```
 
 This will:
-1. Load the GPX track file (`--gpx-file track.gpx`)
+1. Load the GPX track file (`--input-gpx track.gpx`)
 2. Synchronize the GPS data using the processed motion direction and provided GPS settings
 3. Export the synchronized GPX file (`--export-gpx synchronized.gpx`)
 4. Create a GPS synchronization report file (`gps_report.txt`) with offset, similarity, and correlation information (`--gps-report`, requires `--export-gpx`)
@@ -139,7 +135,7 @@ The GPS synchronization will output the time offset in milliseconds and the corr
 
 **Batch processing with subdirectories (INSV + GPX files):**
 ```bash
-# Structure: input_dir/
+# Structure: input_root/
 #   ├── session1/
 #   │   ├── video1.insv
 #   │   └── track1.gpx
@@ -148,27 +144,40 @@ The GPS synchronization will output the time offset in milliseconds and the corr
 #   │   └── track2.gpx
 #   └── ...
 
+# Define input and output directories
+input_root="input"
+output_root="output"
+output_root_abs=$(realpath $output_root)
+
+# Define preset configurations
+preset='{ "version": 2, "stabilization": { "fov": 3.222, "method": "Plain 3D", "smoothing_params": [{"name": "time_constant", "value": 1.0}], "horizon_lock_amount": 1.0, "motion_direction_enabled": true, "motion_direction_params": [{"name": "flip_backward_dir", "value": false}] }, "output": { "width": 960, "height": 540 } }'
+preset_back='{ "version": 2, "stabilization": { "fov": 3.222, "method": "Plain 3D", "smoothing_params": [{"name": "time_constant", "value": 1.0}], "horizon_lock_amount": 1.0, "motion_direction_enabled": true, "motion_direction_params": [{"name": "flip_backward_dir", "value": true}] }, "output": { "width": 960, "height": 540 } }'
+
 # Process all subdirectories containing INSV and GPX files
-for session_dir in input_dir/*/; do
-    if [ -d "$session_dir" ]; then
-        session_name=$(basename "$session_dir")
-        mkdir -p "output/$session_name"
+for rec_dir in "$input_root"/*/; do
+    if [ -d "$rec_dir" ]; then
+        rec_name=$(basename "$rec_dir")
+        out_dir="${output_root_abs}/$rec_name"
+        mkdir -p $out_dir
         
-        insv_file=$(find "$session_dir" -name "*.insv" | head -1)
-        gpx_file=$(find "$session_dir" -name "*.gpx" | head -1)
-        if [ -f "$insv_file" ] && [ -f "$gpx_file" ]; then
-            echo "Processing: $session_name"
-            insv_basename=$(basename "$insv_file" .insv)
-            gyroflow "$insv_file" \
-              --preset "{ 'version': 2, 'stabilization': { 'fov': 3.222, 'method': 'Plain3D', 'smoothing_params': [{'name': 'time_constant', 'value': 1.0}], 'horizon_lock_amount': 1.0, 'motion_direction_enabled': true, 'motion_direction_params': [{'name': 'flip_backward_dir', 'value': false}] } }" \
-              --estimate-motion \
-              --gpx-file "$gpx_file" \
+        vid_file=$(find "$rec_dir" -name "*.insv" | head -1)
+        gpx_file=$(find "$rec_dir" -name "*.gpx" | head -1)
+
+        if [ -f "$vid_file" ] && [ -f "$gpx_file" ]; then
+            echo "Processing: $rec_name"
+            vid_name=$(basename "$vid_file" .insv)
+            # Look at the motion direction; synchronize GPS time
+            export LD_LIBRARY_PATH="/home/igrubisic/projects/gyroflow/target/release:/home/igrubisic/projects/gyroflow/ext/6.4.3/gcc_64/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib/amd64" && /home/igrubisic/apps/Gyroflow/gyroflow "$vid_file" \
+              --preset "$preset" \
+              -p "{'output_folder': '${out_dir}/', 'output_filename': '${vid_name}.mp4'}" \
+              --input-gpx "$gpx_file" \
               --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'max_time_offset_s': 5.0 }" \
-              -p "{'output_folder': 'output/$session_name/', 'output_filename': '${insv_basename}.mp4'}" \
-              --export-gpx "output/$session_name/${insv_basename}.gpx" \
+              --export-gpx "${out_dir}/${vid_name}.gpx" \
               --gps-report
+            # Look back if moving backward
+            #gyroflow "$vid_file" --preset "$preset_back" -p "{'output_folder': '${output_root_abs}/$rec_name/', 'output_filename': '${vid_name}_back.mp4'}"
         else
-            echo "Skipping $session_name: missing INSV or GPX file"
+            echo "Skipping $rec_name: missing INSV or GPX file"
         fi
     fi
 done
@@ -178,39 +187,94 @@ done
 ```
 output/
 ├── session1/
-│   ├── video1.mp4
-│   ├── video1.gpx  # if --export-gpx is specified
-│   └── gps_report.txt   # if --gps-report is specified (requires --export-gpx)
+│   ├── video1.mp4          # original preset (flip_backward_dir: false)
+│   ├── video1_flip.mp4     # flipped preset (flip_backward_dir: true)
+│   ├── video1.gpx          # synchronized GPX (from first call)
+│   └── gps_report.txt      # GPS sync report (from both calls)
 ├── session2/
-│   ├── video2.mp4
-│   ├── video2.gpx  # if --export-gpx is specified
-│   └── gps_report.txt   # if --gps-report is specified (requires --export-gpx)
+│   ├── video2.mp4          # original preset (flip_backward_dir: false)
+│   ├── video2_flip.mp4     # flipped preset (flip_backward_dir: true)
+│   ├── video2.gpx          # synchronized GPX (from first call)
+│   └── gps_report.txt      # GPS sync report (from both calls)
 └── ...
 ```
 
+## Linux
+
+The Linux build produces the following artifacts:
+- `Gyroflow-linux64.AppImage` - Portable AppImage executable
+- `Gyroflow-linux64.tar.gz` - Tar archive with executable and dependencies
+- `Gyroflow-1.6.3-x86_64.AppImage.zsync` - Zsync file for incremental updates
+
+### Running the AppImage
+
+1. Make the AppImage executable:
+   ```bash
+   chmod +x Gyroflow-linux64.AppImage
+   ```
+
+2. Run the application:
+   ```bash
+   ./Gyroflow-linux64.AppImage
+   ```
+
+The AppImage is self-contained and includes all necessary dependencies. No installation is required.
+
+### Running from tar.gz archive
+
+1. Extract the archive:
+   ```bash
+   tar -xzf Gyroflow-linux64.tar.gz
+   ```
+
+2. Run the application:
+   ```bash
+   ./Gyroflow/gyroflow
+   ```
+
+### CLI usage on Linux
+
+All CLI commands shown in the sections above work identically on Linux. Use the appropriate executable:
+- From AppImage: `./Gyroflow-linux64.AppImage [args]`
+- From tar.gz: `./Gyroflow/gyroflow [args]`
+
 ## Testing videos
 
-| ID                         | $\Delta t_\rho$ | $ρ$      | $\Delta t_{d_1}$ | $d_1$ | Description / Comments                                                              | Error |
-| -------------------------- | --------------- | -------- | ---------------- | ----- | ----------------------------------------------------------------------------------- | ----- |
-| 20231223_unit1_58_59_836   | 0.8             | .811     | 0.7              | 1.363 | 2 turns                                                                             | -     |
-| 20241210_unit1_32          | 2.4             | .766     | **1.8**          | 1.427 | Many turns, **VQF inaccurate**, L1 distance is better                               | -     |
-| 20241210_unit1_536         | 0.3             | .870     | 0.7              | 1.346 | One turn, then stationary                                                           | -     |
-| 20241210_unit1_537         | 4.9             | **.213** | 5.2              | 0.697 | **Straight path – GPS sync fails**, synchronization doesn’t work (delays incorrect) | 1     |
-| 20241210_unit4_539         | 0.9             | .669     | 0.7              | 3.479 | Opposite 180° turns, good for testing, clear GPS delay                              | -     |
-| 20241210_unit5_112_627     | 1.4             | .653     | 1.3              | 1.800 | **Bad sync due to reverse direction flipping before 180° turn**                     | -     |
-| 20241210_unit5_213_214_215 | 1.5             | .747     | 1.6              | 3.009 | Many turns                                                                          | -     |
-| 20241210_unit5_216         | 3.1             | .622     | 1.7              | 2.688 | Stationary at start and mid                                                         | -     |
-| 20241210_unit5_238         | 0.0             | .601     | 0.0              | 3.437 | **reverse direction flipping**                                                      | -     |
-| 20241210_unit5_251_252     | 1.7             | .623     | 0.6              | 1.856 | **Motion direction errors on 90° head turns**, possibly related to backward motion  | -     |
-| 20241210_unit5_257_258     | 1.3             | .619     | 1.5              | 4.005 | Small map                                                                           | -     |
-| 20241212_unit3_640_642     | 0.2             | .732     | 0.3              | 4.068 | Backward-facing, many turns, **motion errors @ 2:04**                               | -     |
-| 20241213_unit3_418         | 0.0             | .659     | 0.0              | 1.731 | Backward-facing, sharp corners                                                      | -     |
-| 20241213_unit3_419         | 2.0             | .442     | 2.0              | 5.053 | Backward-facing, sharp corners, motion direction errors, correlation lower          | -     |
-| 20241213_unit3_424         | 1.3             | .416     | 1.4              | 6.918 | Backward-facing, **very noisy GPS start**, delays incorrect (should be ~2.0 s)      | 1     |
-| 20241213_unit3_845_859     | 0.2             | —        | 2.5              | 2.942 | Backward-facing, clear delay, correlation unreliable, corr. incorrect, L1 correct   | -     |
-| 20241214_unit1_566_567     | 6.1             | .160     | 7.8              | 0.856 | **Straight path – GPS sync fails**, delays incorrect                                | 1     |
+| ID                         | $\Delta t_\rho$ | $ρ_{\Delta t_\rho}$ | $\Delta t_{d_1}$ (max 5) | $d_1$ | $ρ$  | Description / Comments                                                              | Error |
+| -------------------------- | --------------- | ------------------- | ------------------------ | ----- | ---- | ----------------------------------------------------------------------------------- | ----- |
+| 20231223_unit1_58_59_836   | 0.8             | .811                | 0.7                      | 1.36  | .809 | 2 turns                                                                             | 0     |
+| 20241210_unit1_32          | 2.4             | .766                | **1.8**                  | 1.43  | .475 | Many turns, **VQF inaccurate**, L1 distance is better                               | 0     |
+| 20241210_unit1_536         | 0.3             | .870                | 0.7                      | 1.35  | .782 | One turn, then stationary                                                           | 0     |
+| 20241210_unit1_537         | 4.9             | **.213**            | 5.2                      | 0.70  | .267 | **Straight path – GPS sync fails**, synchronization doesn’t work (delays incorrect) | 1     |
+| 20241210_unit4_29          |                 |                     | 5                        | 0.97  | .338 | straight path?                                                                      | 1     |
+| 20241210_unit4_30          |                 |                     | 2.9                      | 0.91  | .884 | very slow left turning, metrics good, but possible error                            | ?     |
+| 20241210_unit4_31          |                 |                     | 1.4                      | 0.95  | .293 | straight, only bypassing a stationary truck                                         | 0     |
+| 20241210_unit4_33_685      |                 |                     | 0.6                      | 2.18  | .780 | circuit with many turns                                                             | 0     |
+| 20241210_unit4_539         | 0.9             | .669                | 0.7                      | 3.42  | .661 | Opposite 180° turns, good for testing, clear GPS delay                              | 0     |
+| 20241210_unit5_112_627     | 1.4             | .653                | 1.3                      | 1.65  | .602 | **Bad sync due to reverse direction flipping before 180° turn**                     | 0     |
+| 20241210_unit5_213_214_215 | 1.6             | .747                | 1.6                      | 3.01  | .746 | Many turns                                                                          | 0     |
+| 20241210_unit5_216         | 3.1             | .622                | 1.7                      | 2.69  | .598 | Stationary at start and mid                                                         | 0     |
+| 20241210_unit5_238         | 0.0             | .601                | 0.0                      | 3.40  | .438 | **reverse direction flipping**                                                      | 0     |
+| 20241210_unit5_239         |                 |                     | 2.7                      | 2.98  | .617 | noisy motion direction due to dense traffic, maybe 0.5s off                         | 0     |
+| 20241210_unit5_240_241     |                 |                     | 2.2                      | 4.02  | .124 | STRANGE: motion direction seems to use the back camera stream #todo                 | 0     |
+| 20241210_unit5_242_243     |                 |                     | 2                        | 3.07  | .496 |                                                                                     | 0     |
+| 20241210_unit5_244_245     |                 |                     | 1.4                      | 2.45  | .428 |                                                                                     | 0     |
+| 20241210_unit5_246         |                 |                     | 1.3                      | 3.54  | .256 |                                                                                     | 0     |
+| 20241210_unit5_247         |                 |                     | 2                        | 2.69  | .753 | STRANGE: motion direction seems to use the back camera stream #todo                 | 0     |
+| 20241210_unit5_251_252     | 1.7             | .623                | 0.6                      | 1.86  | .630 | **Motion direction errors on 90° head turns**, possibly related to backward motion  | 0     |
+| 20241210_unit5_257_258     | 1.3             | .619                | 1.5                      | 4.01  | .640 | Small map                                                                           | 0     |
+| 20241212_unit3_640_642     | 0.2             | .732                | 0.3                      | 4.068 |      | Backward-facing, many turns, **motion errors @ 2:04**                               | 0     |
+| 20241213_unit3_418         | 0.0             | .659                | 0.0                      | 1.731 |      | Backward-facing, sharp corners                                                      | 0     |
+| 20241213_unit3_419         | 2.0             | .442                | 2.0                      | 5.053 |      | Backward-facing, sharp corners, motion direction errors, correlation lower          | 0     |
+| 20241213_unit3_424         | 1.3             | .416                | 1.4                      | 6.918 |      | Backward-facing, **very noisy GPS start**, delays incorrect (should be ~2.0 s)      | 1     |
+| 20241213_unit3_845_859     | 0.2             | —                   | 2.5                      | 2.942 |      | Backward-facing, clear delay, correlation unreliable, corr. incorrect, L1 correct   | 0     |
+| 20241214_unit1_566_567     | 6.1             | .160                | 7.8                      | 0.856 |      | **Straight path – GPS sync fails**, delays incorrect                                | 1     |  
 
-
+Correct offsets (estimate): 20/24.  
+Error guesses ($\rho<0.45$):
+- TP=4, TN=14, FP=6, FN=0
+- $P=0.4$, $R=1$
+Confidently correct without human checking: 14/24.
 
 ## Other notes
 
