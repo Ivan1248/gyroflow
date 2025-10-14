@@ -11,7 +11,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use crate::rendering;
 use crate::rendering::render_queue::*;
+use crate::util;
 use indicatif::{ProgressBar, MultiProgress, ProgressState, ProgressStyle};
+use gyroflow_core::filesystem;
 use gyroflow_core::filesystem::path_to_url;
 
 cpp! {{
@@ -122,6 +124,10 @@ struct Opts {
     /// export synchronized GPX file to specified path
     #[argh(option)]
     export_gpx: Option<String>,
+
+    /// create GPS synchronization report file (gps_report.txt) with offset, similarity, and correlation information (requires --export-gpx)
+    #[argh(switch)]
+    gps_report: bool,
 
     /// estimate motion from video (necessary for motion direction alignment)
     #[argh(switch)]
@@ -368,6 +374,19 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                         Ok(_) => log::info!("[{:08x}] GPX exported successfully", job_id),
                                         Err(e) => log::error!("[{:08x}] Failed to export GPX: {}", job_id, e),
                                     }
+
+                                    // Create GPS synchronization report if requested
+                                    if opts.gps_report {
+                                        let report_path = std::path::PathBuf::from(export_gpx_path).parent().unwrap_or(std::path::Path::new(".")).join("gps_report.txt");
+                                        let sync_result = gps.sync_result.as_ref();
+                                        let offset_s = sync_result.map(|r| r.time_offset_s).unwrap_or(gps.offset_ms / 1000.0);
+                                        let similarity = sync_result.map(|r| r.similarity).unwrap_or(0.0);
+                                        let correlation = sync_result.map(|r| r.correlation).unwrap_or(0.0);
+                                        match std::fs::write(&report_path, format!("offset: {}\nsimilarity: {}\ncorrelation: {}\n", offset_s, similarity, correlation)) {
+                                            Ok(_) => log::info!("[{:08x}] GPS report saved to: {}", job_id, report_path.display()),
+                                            Err(e) => log::error!("[{:08x}] Failed to save GPS report: {}", job_id, e),
+                                        }
+                                    }
                                 } else {
                                     log::warn!("[{:08x}] No GPS track loaded, cannot export GPX", job_id);
                                 }
@@ -501,12 +520,18 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                             if mode_i >= 0 { stab.set_gps_sync_mode(mode_i); }
                         }
                         if let Some(v) = val.get("use_processed_motion").and_then(|x| x.as_bool()) { stab.set_gps_use_processed_motion(v); }
-                        if let Some(v) = val.get("speed_threshold").and_then(|x| x.as_f64()) { stab.set_gps_speed_threshold(v); }
-                        if let Some(v) = val.get("max_time_offset_s").and_then(|x| x.as_f64()) { stab.set_gps_max_time_offset(v); }
-                        if let Some(v) = val.get("sample_rate_hz").and_then(|x| x.as_f64()) {
-                            // Not exposed via facade yet; ignore or add when available
-                            let _ = v; // placeholder
+                        // Collect GPS sync settings and set them all at once
+                        let mut sync_settings = stab.get_gps_sync_settings();
+                        if let Some(v) = val.get("speed_threshold").and_then(|x| x.as_f64()) {
+                            sync_settings.speed_threshold = v;
                         }
+                        if let Some(v) = val.get("max_time_offset_s").and_then(|x| x.as_f64()) {
+                            sync_settings.time_offset_range_s = (-v, v);
+                        }
+                        if let Some(v) = val.get("sample_rate_hz").and_then(|x| x.as_f64()) {
+                            sync_settings.sample_rate = v;
+                        }
+                        stab.set_gps_sync_settings(sync_settings);
                     } else {
                         log::error!("[{:08x}] Invalid JSON for --gps-settings", job_id);
                     }
@@ -571,7 +596,8 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                         let gyro = stab.gyro.read();
                         stab.gps.write().synchronize_with_gyro(&gyro);
                         drop(gyro);
-                        log::info!("[{:08x}] GPS synchronization done. Offset(ms) = {:.3}", job_id, stab.gps.read().offset_ms);
+                        let correlation = stab.gps.read().get_correlation().unwrap_or(0.0);
+                        log::info!("[{:08x}] GPS synchronization done. Offset(ms) = {:.3}, Correlation = {:.3}", job_id, stab.gps.read().offset_ms, correlation);
                     }
                 }
 
