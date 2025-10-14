@@ -118,15 +118,22 @@ The last argument is optional.
 gyroflow video.mp4 \
   --preset gps_preset.json \
   --gpx-file track.gpx \
-  --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5 }" \
+  --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'max_time_offset_s': 5.0 }" \
   -p "{'output_path': '/outputs/stabilized.mp4'}" \
-  --export-gpx /outputs/synchronized.gpx
+  --export-gpx /outputs/synchronized.gpx \
+  --gps-report
 ```
 
 This will:
 1. Load the GPX track file (`--gpx-file track.gpx`)
 2. Synchronize the GPS data using the processed motion direction and provided GPS settings
 3. Export the synchronized GPX file (`--export-gpx synchronized.gpx`)
+4. Create a GPS synchronization report file (`gps_report.txt`) with offset, similarity, and correlation information (`--gps-report`, requires `--export-gpx`)
+
+GPS synchronization settings:
+- `max_time_offset_s`: Maximum allowed time offset in seconds (default: 10.0, recommended: 5.0 to prevent incorrect synchronization)
+
+The GPS synchronization will output the time offset in milliseconds and the correlation coefficient to help assess synchronization quality.
 
 ### Batch processing: motion direction alignment and GPS synchronization
 
@@ -156,9 +163,10 @@ for session_dir in input_dir/*/; do
               --preset "{ 'version': 2, 'stabilization': { 'fov': 3.222, 'method': 'Plain3D', 'smoothing_params': [{'name': 'time_constant', 'value': 1.0}], 'horizon_lock_amount': 1.0, 'motion_direction_enabled': true, 'motion_direction_params': [{'name': 'flip_backward_dir', 'value': false}] } }" \
               --estimate-motion \
               --gpx-file "$gpx_file" \
-              --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'sample_rate_hz': 10 }" \
+              --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'max_time_offset_s': 5.0 }" \
               -p "{'output_folder': 'output/$session_name/', 'output_filename': '${insv_basename}.mp4'}" \
-              --export-gpx "output/$session_name/${insv_basename}.gpx"
+              --export-gpx "output/$session_name/${insv_basename}.gpx" \
+              --gps-report
         else
             echo "Skipping $session_name: missing INSV or GPX file"
         fi
@@ -171,28 +179,37 @@ done
 output/
 ├── session1/
 │   ├── video1.mp4
-│   └── sync_video1.gpx
+│   ├── video1.gpx  # if --export-gpx is specified
+│   └── gps_report.txt   # if --gps-report is specified (requires --export-gpx)
 ├── session2/
 │   ├── video2.mp4
-│   └── sync_video2.gpx
+│   ├── video2.gpx  # if --export-gpx is specified
+│   └── gps_report.txt   # if --gps-report is specified (requires --export-gpx)
 └── ...
 ```
 
 ## Testing videos
 
-- 20241210_unit1_536 – one turn, then stationary for a few seconds, GPS delay 0.7 s
-- 20241210_unit1_537 – **straight path – GPS synchronization doesn't work**, GPS delay -11.9 s (incorrect)
-- 20241210_unit1_32 – many turns, **VQF is inaccurate**, GPS delay 1.9s
-- 20241210_unit4_539 – GPS and yaw have opposite 180° turns, good for GPS testing, **clear GPS delay** 1s
-- 20241210_unit5_112_627 – **bad GPS synchronization with motion direction alignment due to reverse direction flipping before 180° turn**, GPS delay 1.6s
-- 20241210_unit5_216 – stationary at beginning and at about 1/3 of the duration, **GPS delay 2.2s=
-- 20241210_unit5_236 – **bad GPS synchronization (7 s delay) due to reverse direction flipping**, GPS delay 1.6s
-- 20241210_unit5_251_252 – **motion direction errors on 90° head turns** (related to handling backward motion?), GPS delay 0.9s
-- 20241210_unit5_257_258 – small map, GPS delay 1.9s
-- 20241212_unit3_640_642 – backward-facing, many turns, **strange motion estimation errors at 2:04**, GPS delay 0.5s
-- 20241213_unit3_424 – backward-facing, **very noisy GPS at the start**, **GPS delay 3.0s (incorrect, should be 2.0s)**
-- 20241213_unit3_845_859 – **backward-facing**, motion direction alignment improves GPS synchronization, GPS delay 2.3s
-- 20241214_unit1_566_567 – **straight path** – GPS synchronization doesn't work, GPS delay -9.8s (incorrect)
+| ID                         | $\Delta t_\rho$ | $ρ$      | $\Delta t_{d_1}$ | $d_1$ | Description / Comments                                                              | Error |
+| -------------------------- | --------------- | -------- | ---------------- | ----- | ----------------------------------------------------------------------------------- | ----- |
+| 20231223_unit1_58_59_836   | 0.8             | .811     | 0.7              | 1.363 | 2 turns                                                                             | -     |
+| 20241210_unit1_32          | 2.4             | .766     | **1.8**          | 1.427 | Many turns, **VQF inaccurate**, L1 distance is better                               | -     |
+| 20241210_unit1_536         | 0.3             | .870     | 0.7              | 1.346 | One turn, then stationary                                                           | -     |
+| 20241210_unit1_537         | 4.9             | **.213** | 5.2              | 0.697 | **Straight path – GPS sync fails**, synchronization doesn’t work (delays incorrect) | 1     |
+| 20241210_unit4_539         | 0.9             | .669     | 0.7              | 3.479 | Opposite 180° turns, good for testing, clear GPS delay                              | -     |
+| 20241210_unit5_112_627     | 1.4             | .653     | 1.3              | 1.800 | **Bad sync due to reverse direction flipping before 180° turn**                     | -     |
+| 20241210_unit5_213_214_215 | 1.5             | .747     | 1.6              | 3.009 | Many turns                                                                          | -     |
+| 20241210_unit5_216         | 3.1             | .622     | 1.7              | 2.688 | Stationary at start and mid                                                         | -     |
+| 20241210_unit5_238         | 0.0             | .601     | 0.0              | 3.437 | **reverse direction flipping**                                                      | -     |
+| 20241210_unit5_251_252     | 1.7             | .623     | 0.6              | 1.856 | **Motion direction errors on 90° head turns**, possibly related to backward motion  | -     |
+| 20241210_unit5_257_258     | 1.3             | .619     | 1.5              | 4.005 | Small map                                                                           | -     |
+| 20241212_unit3_640_642     | 0.2             | .732     | 0.3              | 4.068 | Backward-facing, many turns, **motion errors @ 2:04**                               | -     |
+| 20241213_unit3_418         | 0.0             | .659     | 0.0              | 1.731 | Backward-facing, sharp corners                                                      | -     |
+| 20241213_unit3_419         | 2.0             | .442     | 2.0              | 5.053 | Backward-facing, sharp corners, motion direction errors, correlation lower          | -     |
+| 20241213_unit3_424         | 1.3             | .416     | 1.4              | 6.918 | Backward-facing, **very noisy GPS start**, delays incorrect (should be ~2.0 s)      | 1     |
+| 20241213_unit3_845_859     | 0.2             | —        | 2.5              | 2.942 | Backward-facing, clear delay, correlation unreliable, corr. incorrect, L1 correct   | -     |
+| 20241214_unit1_566_567     | 6.1             | .160     | 7.8              | 0.856 | **Straight path – GPS sync fails**, delays incorrect                                | 1     |
+
 
 
 ## Other notes
