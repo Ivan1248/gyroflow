@@ -234,43 +234,43 @@ The AppImage is self-contained and includes all necessary dependencies. No insta
 
 ## Testing videos
 
-| ID                         | $\Delta t_\rho$ | $ρ_{\Delta t_\rho}$ | $\Delta t_{d_1}$ (max 5) | $d_1$ | $ρ$  | Description / Comments                                                              | Error |
-| -------------------------- | --------------- | ------------------- | ------------------------ | ----- | ---- | ----------------------------------------------------------------------------------- | ----- |
-| 20231223_unit1_58_59_836   | 0.8             | .811                | 0.7                      | 1.36  | .809 | 2 turns                                                                             | 0     |
-| 20241210_unit1_32          | 2.4             | .766                | **1.8**                  | 1.43  | .475 | Many turns, **VQF inaccurate**, L1 distance is better                               | 0     |
-| 20241210_unit1_536         | 0.3             | .870                | 0.7                      | 1.35  | .782 | One turn, then stationary                                                           | 0     |
-| 20241210_unit1_537         | 4.9             | **.213**            | 5.2                      | 0.70  | .267 | **Straight path – GPS sync fails**, synchronization doesn’t work (delays incorrect) | 1     |
-| 20241210_unit4_29          |                 |                     | 5                        | 0.97  | .338 | straight path?                                                                      | 1     |
-| 20241210_unit4_30          |                 |                     | 2.9                      | 0.91  | .884 | very slow left turning, metrics good, but possible error                            | ?     |
-| 20241210_unit4_31          |                 |                     | 1.4                      | 0.95  | .293 | straight, only bypassing a stationary truck                                         | 0     |
-| 20241210_unit4_33_685      |                 |                     | 0.6                      | 2.18  | .780 | circuit with many turns                                                             | 0     |
-| 20241210_unit4_539         | 0.9             | .669                | 0.7                      | 3.42  | .661 | Opposite 180° turns, good for testing, clear GPS delay                              | 0     |
-| 20241210_unit5_112_627     | 1.4             | .653                | 1.3                      | 1.65  | .602 | **Bad sync due to reverse direction flipping before 180° turn**                     | 0     |
-| 20241210_unit5_213_214_215 | 1.6             | .747                | 1.6                      | 3.01  | .746 | Many turns                                                                          | 0     |
-| 20241210_unit5_216         | 3.1             | .622                | 1.7                      | 2.69  | .598 | Stationary at start and mid                                                         | 0     |
-| 20241210_unit5_238         | 0.0             | .601                | 0.0                      | 3.40  | .438 | **reverse direction flipping**                                                      | 0     |
-| 20241210_unit5_239         |                 |                     | 2.7                      | 2.98  | .617 | noisy motion direction due to dense traffic, maybe 0.5s off                         | 0     |
-| 20241210_unit5_240_241     |                 |                     | 2.2                      | 4.02  | .124 | STRANGE: motion direction seems to use the back camera stream #todo                 | 0     |
-| 20241210_unit5_242_243     |                 |                     | 2                        | 3.07  | .496 |                                                                                     | 0     |
-| 20241210_unit5_244_245     |                 |                     | 1.4                      | 2.45  | .428 |                                                                                     | 0     |
-| 20241210_unit5_246         |                 |                     | 1.3                      | 3.54  | .256 |                                                                                     | 0     |
-| 20241210_unit5_247         |                 |                     | 2                        | 2.69  | .753 | STRANGE: motion direction seems to use the back camera stream #todo                 | 0     |
-| 20241210_unit5_251_252     | 1.7             | .623                | 0.6                      | 1.86  | .630 | **Motion direction errors on 90° head turns**, possibly related to backward motion  | 0     |
-| 20241210_unit5_257_258     | 1.3             | .619                | 1.5                      | 4.01  | .640 | Small map                                                                           | 0     |
-| 20241212_unit3_640_642     | 0.2             | .732                | 0.3                      | 4.068 |      | Backward-facing, many turns, **motion errors @ 2:04**                               | 0     |
-| 20241213_unit3_418         | 0.0             | .659                | 0.0                      | 1.731 |      | Backward-facing, sharp corners                                                      | 0     |
-| 20241213_unit3_419         | 2.0             | .442                | 2.0                      | 5.053 |      | Backward-facing, sharp corners, motion direction errors, correlation lower          | 0     |
-| 20241213_unit3_424         | 1.3             | .416                | 1.4                      | 6.918 |      | Backward-facing, **very noisy GPS start**, delays incorrect (should be ~2.0 s)      | 1     |
-| 20241213_unit3_845_859     | 0.2             | —                   | 2.5                      | 2.942 |      | Backward-facing, clear delay, correlation unreliable, corr. incorrect, L1 correct   | 0     |
-| 20241214_unit1_566_567     | 6.1             | .160                | 7.8                      | 0.856 |      | **Straight path – GPS sync fails**, delays incorrect                                | 1     |  
+| ID                         | $\Delta t_\rho$ | $ρ_{\Delta t_\rho}$ | $\Delta t_{d_1}$ (max 5) | $d_1$ | $ρ$  | Description / Comments                                                              | Error |     |
+| -------------------------- | --------------- | ------------------- | ------------------------ | ----- | ---- | ----------------------------------------------------------------------------------- | ----- | --- |
+| 20231223_unit1_58_59_836   | 0.8             | .811                | 0.7                      | 1.36  | .809 | 2 turns                                                                             | 0     |     |
+| 20241210_unit1_32          | 2.4             | .766                | **1.8**                  | 1.43  | .475 | Many turns, **VQF inaccurate**, L1 distance is better                               | 0     |     |
+| 20241210_unit1_536         | 0.3             | .870                | 0.7                      | 1.35  | .782 | One turn, then stationary                                                           | 0     |     |
+| 20241210_unit1_537         | 4.9             | **.213**            | 5.2                      | 0.70  | .267 | **Straight path – GPS sync fails**, synchronization doesn’t work (delays incorrect) | 1     |     |
+| 20241210_unit4_29          |                 |                     | 5                        | 0.97  | .338 | straight path?                                                                      | 1     |     |
+| 20241210_unit4_30          |                 |                     | 2.9                      | 0.91  | .884 | very slow left turning, metrics good, but possible error                            | ?     |     |
+| 20241210_unit4_31          |                 |                     | 1.4                      | 0.95  | .293 | straight, only bypassing a stationary truck                                         | 0     |     |
+| 20241210_unit4_33_685      |                 |                     | 0.6                      | 2.18  | .780 | circuit with many turns                                                             | 0     |     |
+| 20241210_unit4_539         | 0.9             | .669                | 0.7                      | 3.42  | .661 | Opposite 180° turns, clear GPS delay                                                | 0     |     |
+| 20241210_unit5_112_627     | 1.4             | .653                | 1.3                      | 1.65  | .602 | reverse direction flipping before 180° turn                                         | 0     |     |
+| 20241210_unit5_213_214_215 | 1.6             | .747                | 1.6                      | 3.01  | .746 | Many turns                                                                          | 0     |     |
+| 20241210_unit5_216         | 3.1             | .622                | 1.7                      | 2.69  | .598 | Stationary at start and mid                                                         | 0     |     |
+| 20241210_unit5_238         | 0.0             | .601                | 0.0                      | 3.40  | .438 | **reverse direction flipping**                                                      | 0     |     |
+| 20241210_unit5_239         |                 |                     | 2.7                      | 2.98  | .617 | noisy motion direction due to dense traffic, maybe 0.5s off                         | 0     |     |
+| 20241210_unit5_240_241     |                 |                     | 2.2                      | 4.02  | .124 | STRANGE: motion direction seems to use the back camera stream #todo                 | 0     |     |
+| 20241210_unit5_242_243     |                 |                     | 2                        | 3.07  | .496 |                                                                                     | 0     |     |
+| 20241210_unit5_244_245     |                 |                     | 1.4                      | 2.45  | .428 |                                                                                     | 0     |     |
+| 20241210_unit5_246         |                 |                     | 1.3                      | 3.54  | .256 |                                                                                     | 0     |     |
+| 20241210_unit5_247         |                 |                     | 2                        | 2.69  | .753 | STRANGE: motion direction seems to use the back camera stream #todo                 | 0     |     |
+| 20241210_unit5_251_252     | 1.7             | .623                | 0.6                      | 1.86  | .630 | **Motion direction errors on 90° head turns**, possibly related to backward motion  | 0     |     |
+| 20241210_unit5_257_258     | 1.3             | .619                | 1.5                      | 4.01  | .640 | Small map                                                                           | 0     |     |
+| 20241212_unit3_640_642     | 0.2             | .732                | 0.3                      | 4.068 |      | Backward-facing, many turns, **motion errors @ 2:04**                               | 0     |     |
+| 20241213_unit3_418         | 0.0             | .659                | 0.0                      | 1.731 |      | Backward-facing, sharp corners                                                      | 0     |     |
+| 20241213_unit3_419         | 2.0             | .442                | 2.0                      | 5.053 |      | Backward-facing, sharp corners, motion direction errors, correlation lower          | 0     |     |
+| 20241213_unit3_424         | 1.3             | .416                | 1.4                      | 6.918 |      | Backward-facing, **very noisy GPS start**, delays incorrect (should be ~2.0 s)      | 1     |     |
+| 20241213_unit3_845_859     | 0.2             | —                   | 2.5                      | 2.942 |      | Backward-facing, clear delay, correlation unreliable, corr. incorrect, L1 correct   | 0     |     |
+| 20241214_unit1_566_567     | 6.1             | .160                | 7.8                      | 0.856 |      | **Straight path – GPS sync fails**, delays incorrect                                | 1     |     |
 
-Correct offsets (estimate): 20/24.  
+Correct offsets (estimate): 20/24. 
 
-Error guesses ($\rho<0.45$):  
+Error guesses ($\rho<0.45$):
 - TP=4, TN=14, FP=6, FN=0
-- $P=0.4$, $R=1$  
+- $P=0.4$, $R=1$
 
-Confidently correct without human checking: 14/24.
+Confidently correct without manual checking: 14/24.
 
 ## Other notes
 
