@@ -428,6 +428,19 @@ impl Controller {
             }
         };
 
+        // Note: MDK doesn't support stream selection, so preview always shows the first video stream
+       
+        // The UI shows a note when "Back camera" mode is selected to inform the user
+        //if !options.is_empty() {
+        //    if custom_decoder.is_empty() {
+        //        custom_decoder = format!("FFmpeg{}", options);
+        //    } else {
+        //        custom_decoder = format!("{}{}", custom_decoder, options);
+        //    }
+        //}
+
+        // Note: this is duplicate code with mdk_processor.rs
+
         if filename.to_ascii_lowercase().ends_with("braw") {
             let gpu = if self.stabilizer.gpu_decoding.load(SeqCst) { "auto" } else { "no" }; // Disable GPU decoding for BRAW
             custom_decoder = format!("BRAW:gpu={}{}", gpu, options);
@@ -484,8 +497,12 @@ impl Controller {
         let timestamps_fract: Vec<f64> = timestamps_fract.split(';').filter_map(|x| x.parse::<f64>().ok()).collect();
 
         let progress = util::qt_queued_callback_mut(self, |this, (percent, ready, total): (f64, usize, usize)| {
-            this.sync_in_progress = ready < total || percent < 1.0;
-            this.sync_in_progress_changed();
+            // Do not toggle sync_in_progress here to avoid races where late progress updates
+            // re-enable the flag after completion. Lifecycle handlers set it true/false.
+            if !this.sync_in_progress {
+                this.sync_in_progress = true;
+                this.sync_in_progress_changed();
+            }
             this.chart_data_changed();
             this.sync_progress(percent, ready, total);
         });
@@ -530,6 +547,13 @@ impl Controller {
         let request_recompute = util::qt_queued_callback_mut(self, move |this, _: ()| {
             this.request_recompute();
         });
+        // Safety net: ensure UI doesn't get stuck in syncing state if finish callbacks fail
+        let ensure_sync_flag_clear = util::qt_queued_callback_mut(self, move |this, _: ()| {
+            if this.sync_in_progress {
+                this.sync_in_progress = false;
+                this.sync_in_progress_changed();
+            }
+        });
         let err = util::qt_queued_callback_mut(self, |this, (msg, mut arg): (String, String)| {
             arg.push_str("\n\n");
             arg.push_str(&rendering::get_log());
@@ -568,6 +592,8 @@ impl Controller {
                     err(("An error occured: %1".to_string(), e));
                 }
                 request_recompute(());
+                // Force-clear sync flag in case progress handler re-enabled it after finish
+                ensure_sync_flag_clear(());
             });
         } else {
             err(("An error occured: %1".to_string(), "Invalid parameters".to_string()));

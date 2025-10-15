@@ -619,6 +619,13 @@ impl GyroSource {
             // rotation quaternion from smooth motion -> raw motion to counteract it
             *sq.1 = sq.1.inverse() * q.1;
         }
+        // If rendering the back camera, convert stabilization difference to back-camera basis
+        if compute_params.is_back_camera {
+            let r = nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), std::f64::consts::PI);
+            for (_ts, dq) in smoothed_quaternions.iter_mut() {
+                *dq = r * *dq * r.inverse();
+            }
+        }
         (smoothed_quaternions, max_angles)
     }
 

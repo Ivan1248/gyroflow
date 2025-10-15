@@ -39,6 +39,16 @@ impl MDKProcessor {
         let mut options: String = decoder_options.map(|x| x.into_iter().map(|x| format!("{}={}", x.0, x.1)).join(":")).unwrap_or_default();
         if !options.is_empty() { options.insert(0, ':'); }
 
+        // Note: MDK doesn't support stream selection
+        
+        //if !options.is_empty() {
+        //    if custom_decoder.is_empty() {
+        //        custom_decoder = format!("FFmpeg{}", options);
+        //    } else {
+        //        custom_decoder = format!("{}{}", custom_decoder, options);
+        //    }
+        //}
+
         if filename.to_ascii_lowercase().ends_with("braw") {
             let gpu = if gpu_edcoding { "auto" } else { "no" }; // Disable GPU decoding for BRAW
             custom_decoder = format!("BRAW:gpu={}{}", gpu, options);

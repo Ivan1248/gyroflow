@@ -32,6 +32,8 @@ pub struct RenderQueueItem {
     pub error_string: QString,
     pub processing_progress: f64,
 
+    pub dual_stream: bool,
+
     frame_times: std::collections::VecDeque<(u64, u64)>,
 
     status: JobStatus
@@ -442,6 +444,10 @@ impl RenderQueue {
             });
         } else {
             let mut q = self.queue.borrow_mut();
+            let dual_stream = match crate::rendering::FfmpegProcessor::list_video_streams(&core::filesystem::get_engine_base(), &video_url) {
+                Ok(v) => v.len() >= 2,
+                Err(_) => false
+            };
             q.push(RenderQueueItem {
                 job_id,
                 input_file: QString::from(video_url.as_str()),
@@ -461,6 +467,7 @@ impl RenderQueue {
                 error_string: QString::default(),
                 frame_times: Default::default(),
                 status: JobStatus::Queued,
+                dual_stream,
             });
         }
         drop(params);
@@ -1200,7 +1207,7 @@ impl RenderQueue {
                     let smoothing = stabilizer.smoothing.read().clone();
                     let params = stabilizer.params.read();
 
-                    let mut stab = StabilizationManager {
+                    let stab = StabilizationManager {
                         params: Arc::new(RwLock::new(core::stabilization_params::StabilizationParams {
                             fov:                    params.fov,
                             background:             params.background,

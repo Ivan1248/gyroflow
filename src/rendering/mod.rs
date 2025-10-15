@@ -10,22 +10,29 @@ pub mod ffmpeg_hw;
 pub mod render_queue;
 pub mod mdk_processor;
 pub mod video_processor;
+mod cpu_stitcher;
+pub mod dual_video_processor;
+mod stitching_processor;
 pub mod zero_copy;
 use gyroflow_core::settings;
+use gyroflow_core::filesystem::EngineBase;
 use zero_copy::*;
+use dual_video_processor::DualVideoProcessor;
 #[cfg(target_os = "android")]
 pub mod ffmpeg_android;
 
 pub use self::video_processor::VideoProcessor;
 pub use self::ffmpeg_processor::{ FfmpegProcessor, FFmpegError };
+pub use self::ffmpeg_processor::VideoInfo as FFVideoInfo;
 use render_queue::RenderOptions;
 use crate::core::{ StabilizationManager, stabilization::* };
-use ffmpeg_next::{ format::Pixel, frame::Video, codec, Error, ffi };
+use ffmpeg_next::{ format::Pixel, frame::{self, Video}, codec::{self, encoder}, format, util::rational::Rational, software, Dictionary, Packet, Error, ffi };
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::os::raw::c_char;
 use std::os::raw::c_int;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::sync::{ Arc, atomic::AtomicBool };
 use parking_lot::RwLock;
 use gyroflow_core::gpu::Buffers;
@@ -34,6 +41,39 @@ use gyroflow_core::gpu::Buffers;
 enum GpuType {
     Nvidia, Amd, Intel, AppleSilicon, Android, WindowsArm, Unknown
 }
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum DualStreamMode {
+    Default,
+    Back,
+    Stitched,
+}
+
+impl DualStreamMode {
+    pub fn from_string(s: &str) -> Self {
+        match s {
+            "back" => DualStreamMode::Back,
+            "stitched" => DualStreamMode::Stitched,
+            _ => DualStreamMode::Default,
+        }
+    }
+}
+
+fn select_stream_index(fs_base: &EngineBase, url: &str, dual_stream_mode: DualStreamMode) -> Option<usize> {
+    if let Ok(streams) = crate::rendering::FfmpegProcessor::list_video_streams(fs_base, url) {
+        if streams.len() >= 2 && dual_stream_mode == DualStreamMode::Back {
+            ::log::debug!("Using second video stream (stream {}/{}) for motion estimation", streams[1], streams.len());
+            assert_eq!(streams[1], 1);
+            return Some(streams[1]);
+        } else if !streams.is_empty() {
+            ::log::debug!("Using first video stream (stream {}/{}) for motion estimation", streams[0], streams.len());
+            assert_eq!(streams[0], 0);
+            return Some(streams[0]);
+        }
+    }
+    None
+}
+
 lazy_static::lazy_static! {
     static ref GPU_TYPE: RwLock<GpuType> = RwLock::new(GpuType::Unknown);
 }
@@ -241,7 +281,26 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     }
     let gpu_decoding = stab.gpu_decoding.load(std::sync::atomic::Ordering::SeqCst);
     let fs_base = gyroflow_core::filesystem::get_engine_base();
-    let mut proc = FfmpegProcessor::from_file(&fs_base, &input_file.url, gpu_decoding && gpu_decoder_index >= 0, gpu_decoder_index as usize, Some(decoder_options))?;
+    ::log::info!("[render] Starting decoder init. url={}, gpu_decoding={}, gpu_decoder_index={}", &input_file.url, gpu_decoding, gpu_decoder_index);
+    
+    // Check for dual-stream rendering mode
+    let dual_stream_mode = DualStreamMode::from_string(&settings::get_str("dualStreamMode", "default"));
+
+    // For dual-stream stitched mode, we need to handle it differently
+    if dual_stream_mode == DualStreamMode::Stitched {
+        return render_dual_stitched(stab, progress, input_file, render_options, gpu_decoder_index, trim_range_ind, cancel_flag, pause_flag, encoder_initialized);
+    }
+
+    let stream_index = select_stream_index(&fs_base, &input_file.url, dual_stream_mode);
+    let mut proc = FfmpegProcessor::from_file_with_video_stream_index(
+        &fs_base,
+        &input_file.url,
+        gpu_decoding && gpu_decoder_index >= 0,
+        gpu_decoder_index as usize,
+        Some(decoder_options),
+        stream_index
+    )?;
+    ::log::info!("[render] Decoder initialized. gpu_device={:?}, input_index={}", &proc.gpu_device, proc.video.input_index);
 
     let render_options_dict = render_options.get_encoder_options_dict();
     let hwaccel_device = render_options_dict.get("hwaccel_device");
@@ -501,6 +560,8 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                     }
 
                     let mut compute_params = ComputeParams::from_manager(&stab);
+                    // Mark compute context as back-camera if selected
+                    compute_params.is_back_camera = dual_stream_mode == DualStreamMode::Back;
 
                     let is_limited_range = $out_frame.color_range() == ffmpeg_next::util::color::Range::MPEG;
                     compute_params.background = <$t as PixelType>::from_rgb_color(compute_params.background, &$yuvi, is_limited_range);
@@ -918,7 +979,16 @@ where
     };
 
     let fs_base = gyroflow_core::filesystem::get_engine_base();
-    let mut proc = VideoProcessor::from_file(&fs_base, &input_file.url, gpu_decoding, 0, Some(decoder_options))
+    // Select which stream to use for motion estimation. If Back mode is selected,
+    // use the second stream; otherwise use the first (default). Keep preview flag as fallback.
+    let stream_index = select_stream_index(&fs_base, &input_file.url, DualStreamMode::from_string(&settings::get_str("dualStreamMode", "default")));
+    let mut proc = VideoProcessor::from_file_with_stream_index(
+        &fs_base, 
+        &input_file.url, 
+        gpu_decoding, 
+        0, 
+        Some(decoder_options), 
+        stream_index)
         .map_err(|e| e.to_string())?;
 
     let ranges = sync.get_ranges();
@@ -1044,3 +1114,264 @@ pub fn test_decode() {
     let _ = proc.start_decoder_only(vec![(0.0, 1000.0)], Arc::new(AtomicBool::new(false)));
     ::log::debug!("Done in {:.3} ms", _time.elapsed().as_micros() as f64 / 1000.0);
 }*/
+
+fn setup_dual_stream_processor<'a>(fs_base: &'a gyroflow_core::filesystem::EngineBase, input_url: &str, gpu_decoding: bool, gpu_decoder_index: usize) -> Result<DualVideoProcessor<'a>, ()> {
+    let streams = FfmpegProcessor::list_video_streams(fs_base, input_url)
+        .map_err(|e| {
+            ::log::warn!("[render_dual_stitched] Failed to list streams: {:?}, falling back to single stream", e);
+        })?;
+    if streams.len() < 2 {
+        ::log::warn!("[render_dual_stitched] Video doesn't have enough streams for dual rendering, falling back to single stream");
+        return Err(());
+    }
+    DualVideoProcessor::from_file_with_streams(fs_base, input_url, gpu_decoding, gpu_decoder_index, Some(ffmpeg_next::Dictionary::new()), streams[0], streams[1])
+        .map_err(|e| {
+            ::log::warn!("[render_dual_stitched] Failed to create dual processor: {:?}, falling back to single stream", e);
+        })
+}
+
+/// Render function for dual-stream stitched mode
+pub fn render_dual_stitched<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &gyroflow_core::InputFile, render_options: &RenderOptions, gpu_decoder_index: i32, trim_range_ind: Option<usize>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>, encoder_initialized: F2) -> Result<(), FFmpegError>
+where
+    F: Fn((f64, usize, usize, bool, bool)) + Send + Sync + Clone,
+    F2: Fn(String) + Send + Sync + Clone,
+{
+    ::log::info!("[render_dual_stitched] Starting dual-stream stitched rendering");
+
+    let fs_base = gyroflow_core::filesystem::get_engine_base();
+    let gpu_decoding = stab.gpu_decoding.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Check if dual-stream rendering is possible and set up components
+    let dual_proc = match setup_dual_stream_processor(&fs_base, &input_file.url, gpu_decoding && gpu_decoder_index >= 0, gpu_decoder_index as usize) {
+        Ok(proc) => proc,
+        Err(_) => {
+            return render(stab, progress, input_file, render_options, gpu_decoder_index, trim_range_ind, cancel_flag, pause_flag, encoder_initialized);
+        }
+    };
+
+    // Create CPU stitcher and configure based on camera metadata
+    let mut stitcher = cpu_stitcher::CpuStitcher::new(render_options.output_width as u32, render_options.output_height as u32);
+
+    // Configure stitcher based on lens profile data
+    let lens_profile = stab.lens.read().clone();
+
+    ::log::info!("[render_dual_stitched] Configuring stitcher with lens profile: {} ({} {})",
+                lens_profile.name, lens_profile.camera_brand, lens_profile.camera_model);
+    stitcher.configure_for_lens_profile(&lens_profile);
+        
+    // Create stitching processor that feeds stitched frames through the stabilization pipeline
+    let mut stitching_proc = stitching_processor::StitchingProcessor::new(dual_proc, stitcher);
+
+    // Set up encoder parameters like the single-stream processor
+    let render_options_dict = render_options.get_encoder_options_dict();
+    let hwaccel_device = render_options_dict.get("hwaccel_device");
+
+    match render_options.codec.as_str() {
+        "ProRes" => {
+            let profile = match render_options.codec_options.as_str() {
+                "Proxy" => 0,
+                "LT" => 1,
+                "Standard" => 2,
+                "HQ" => 3,
+                _ => 2,
+            };
+            stitching_proc.video.encoder_params.pixel_format = Some(Pixel::YUV422P10LE);
+        }
+        "DNxHD" => {
+            let profiles = ["DNxHD", "DNxHR LB", "DNxHR SQ", "DNxHR HQ", "DNxHR HQX", "DNxHR 444"];
+            let pix_fmts = [Pixel::YUV422P, Pixel::YUV422P, Pixel::YUV422P, Pixel::YUV422P, Pixel::YUV422P10LE, Pixel::YUV444P10LE];
+            if let Some(profile) = profiles.iter().position(|&x| x == render_options.codec_options) {
+                stitching_proc.video.encoder_params.pixel_format = Some(pix_fmts[profile]);
+            }
+        }
+        "cfhd" => {
+            stitching_proc.video.encoder_params.pixel_format = Some(Pixel::YUV422P10LE);
+        }
+        "png" => {
+            // For stitched output, we don't have alpha yet, so assume no alpha
+            if render_options.codec_options.contains("16-bit") {
+                stitching_proc.video.encoder_params.pixel_format = Some(Pixel::RGB48BE);
+            } else {
+                stitching_proc.video.encoder_params.pixel_format = Some(Pixel::RGB24);
+            }
+        }
+        "exr" => {
+            // For stitched output, we don't have alpha yet, so assume no alpha
+            stitching_proc.video.encoder_params.pixel_format = Some(Pixel::GBRPF32LE);
+        }
+        _ => {}
+    }
+
+    // Determine encoder and set up stitching processor
+    let encoder = ffmpeg_hw::find_working_encoder(&get_possible_encoders(&render_options.codec, render_options.use_gpu), hwaccel_device);
+    stitching_proc.video_codec = Some(encoder.0.to_owned());
+    stitching_proc.video.gpu_encoding = encoder.1;
+
+    ::log::info!("[render_dual_stitched] Starting dual-stream stitched rendering with encoder: {}", encoder.0);
+
+    // For now, implement a minimal stitching pipeline that processes frames but doesn't encode yet
+    // This allows us to test the stitching logic without getting into full stabilization/encoding complexity
+
+    let params = stab.params.read();
+    let ranges = params.trim_ranges.clone();
+    let fps = params.fps;
+    let duration_ms = params.duration_ms;
+    let output_size = params.output_size;
+    drop(params);
+
+    // Calculate frame count for progress
+    let render_duration = duration_ms * stab.params.read().get_trim_ratio();
+    let total_frame_count = ((render_duration / 1000.0) * fps).round() as usize;
+
+    ::log::info!("[render_dual_stitched] Starting stitched dual-stream processing, expected frames: {}", total_frame_count);
+
+    // Set up progress callback
+    progress((0.0, 0, total_frame_count, false, false));
+
+    // For now, we'll track frame count in the callback by using a shared counter
+    let frame_counter = Arc::new(std::sync::Mutex::new(0));
+    let frame_counter_clone = frame_counter.clone();
+
+    // For encoding, we'll collect the stitched frames and encode them after stitching
+    let stitched_frames = Arc::new(std::sync::Mutex::new(Vec::<(i64, frame::Video)>::new()));
+    let stitched_frames_clone = stitched_frames.clone();
+
+    stitching_proc.on_frame(move |ts, frame, _output_frame, _converter, _rate_control| {
+        let mut count = frame_counter_clone.lock().unwrap();
+        *count += 1;
+        if *count % (total_frame_count / 20) == 0 {
+            ::log::debug!("[render_dual_stitched] Stitched {:.0}% of frames", *count as f64 / total_frame_count as f64 * 100.0);
+        }
+
+        // Clone the frame for encoding (expensive but necessary)
+        let frame_clone = unsafe { frame::Video::wrap(ffi::av_frame_clone(frame.as_ptr())) };
+        stitched_frames_clone.lock().unwrap().push((ts, frame_clone));
+
+        Ok(())
+    })?;
+
+    stitching_proc.start_decoder_only(ranges.clone(), cancel_flag.clone())?;
+
+    let frame_count = *frame_counter.lock().unwrap();
+    ::log::info!("[render_dual_stitched] Dual-stream stitching completed, processed {} frames", frame_count);
+
+    // Now encode the collected stitched frames
+    let mut collected_frames = stitched_frames.lock().unwrap();
+    ::log::info!("[render_dual_stitched] Encoding {} stitched frames", collected_frames.len());
+
+    // Sort frames by timestamp to ensure correct temporal order
+    collected_frames.sort_by_key(|(ts, _)| *ts);
+
+    if !collected_frames.is_empty() {
+        // Set up output file
+        let output_path = std::path::Path::new(&render_options.output_folder).join(&render_options.output_filename);
+        ::log::info!("[render_dual_stitched] Output path: {:?}", output_path);
+
+        let mut output_context = format::output(&output_path).map_err(|e| FFmpegError::from(e))?;
+
+        // Create a simple video encoder for the stitched frames
+        let codec = encoder::find(codec::Id::H264).ok_or_else(|| {
+            ::log::error!("[render_dual_stitched] H.264 codec not found");
+            FFmpegError::EncoderNotFound
+        })?;
+        let mut ost = output_context.add_stream(codec)?;
+        let ctx_ptr = unsafe { ffi::avcodec_alloc_context3(codec.as_ptr()) };
+        let context = unsafe { codec::context::Context::wrap(ctx_ptr, Some(std::rc::Rc::new(0))) };
+        let mut encoder = context.encoder().video()?;
+
+        // Configure encoder with stitched frame properties
+        let first_frame = &collected_frames[0].1;
+        encoder.set_width(first_frame.width());
+        encoder.set_height(first_frame.height());
+        encoder.set_format(format::Pixel::YUV420P); // H.264 compatible format
+        // Use project FPS if available
+        let fps_num = if fps > 0.0 { fps.round() as i32 } else { 30 };
+        encoder.set_frame_rate(Some(Rational::new(fps_num, 1)));
+        // Use microseconds as encoder time_base to match timestamp units we set on frames
+        let enc_time_base = Rational::new(1, 1_000_000);
+        encoder.set_time_base(enc_time_base);
+
+        // Create pixel format converter for RGBA -> YUV420P
+        let mut converter = software::scaling::Context::get(
+            first_frame.format(),
+            first_frame.width(),
+            first_frame.height(),
+            format::Pixel::YUV420P,
+            first_frame.width(),
+            first_frame.height(),
+            software::scaling::Flags::BILINEAR,
+        )?;
+
+        // Set encoder options
+        let mut encoder_options = Dictionary::new();
+        encoder_options.set("preset", "fast");
+        encoder_options.set("crf", "23");
+
+        ost.set_parameters(&encoder);
+        let mut encoder = encoder.open_with(encoder_options)?;
+
+        // Notify that encoder is initialized, like the regular render function
+        encoder_initialized(encoder.codec().map(|x| x.name().to_string()).unwrap_or_default());
+
+        output_context.write_header()?;
+        // Cache output stream time base for packet timestamp rescale
+        let ost_time_base = output_context.stream(0).ok_or(Error::StreamNotFound)?.time_base();
+
+        let mut packet = Packet::empty();
+
+        // Encode each frame
+        let frame_interval_us: i64 = if fps > 0.0 { (1_000_000.0 / fps).round() as i64 } else { 33_333 };
+        for (i, (_ts, frame)) in collected_frames.iter().enumerate() {
+            if cancel_flag.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let pts_us = (i as i64) * frame_interval_us;
+
+            // Convert RGBA to YUV420P
+            let mut converted_frame = frame::Video::new(format::Pixel::YUV420P, frame.width(), frame.height());
+            converter.run(frame, &mut converted_frame)?;
+
+            // Set monotonic PTS in encoder time_base units
+            converted_frame.set_pts(Some(pts_us));
+
+            encoder.send_frame(&converted_frame)?;
+            while let Ok(()) = encoder.receive_packet(&mut packet) {
+                packet.set_stream(0);
+                // Rescale packet timestamps from encoder time_base to output stream time_base
+                packet.rescale_ts(enc_time_base, ost_time_base);
+                packet.write_interleaved(&mut output_context)?;
+                //if i % (collected_frames.len() / 20) == 0 {
+                //    ::log::debug!("[render_dual_stitched] Wrote encoded packet for frame {}", i + 1);
+                //}
+            }
+
+            // Update progress
+            progress(((i + 1) as f64 / collected_frames.len() as f64, i + 1, collected_frames.len(), false, false));
+        }
+
+        // Flush encoder
+        encoder.send_eof()?;
+        while let Ok(()) = encoder.receive_packet(&mut packet) {
+            packet.set_stream(0);
+            packet.write_interleaved(&mut output_context)?;
+        }
+
+        output_context.write_trailer()?;
+        ::log::info!("[render_dual_stitched] Encoding completed, output file: {:?}", output_path);
+
+        // Update file times and copy metadata like the regular render function
+        let output_url = gyroflow_core::filesystem::get_file_url(&render_options.output_folder, &render_options.output_filename, false);
+        let start_ms = ranges.first().and_then(|x| Some(x.0));
+        crate::util::update_file_times(&output_url, &input_file.url, start_ms);
+
+        if render_options.preserve_other_tracks {
+            if let Err(e) = crate::util::copy_insta360_metadata(&output_url, &input_file.url) {
+                ::log::error!("Failed to copy Insta360 metadata: {e:?}");
+            }
+        }
+    }
+
+    progress((1.0, total_frame_count, total_frame_count, true, false));
+    Ok(())
+}

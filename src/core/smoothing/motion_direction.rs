@@ -123,9 +123,10 @@ impl MotionDirectionAlignment {
             let motion_dir_opt: Option<nalgebra::Vector3<f64>> = if let Some((tdir, qual)) = compute_params.pose_estimator.get_transl_dir_near(*ts, window_us, false) {
                 if qual.meets_thresholds(self.min_inlier_ratio, self.max_epi_err) {
                     // Flip sign to get camera motion direction
-                    // TODO: remove the if and always multiply by -1 so that the camera points in the forward movement direction
-                    let sign_correction = if tdir[2] <= 0.0 { /*forward*/ -1.0} else if self.flip_backward_dir {1.0} else {-1.0};
-                    Some(sign_correction * nalgebra::Vector3::new(tdir[0], tdir[1], tdir[2]))
+                    let sign_corr = if tdir[2] <= 0.0 { /*forward*/ -1.0} else if self.flip_backward_dir {1.0} else {-1.0};
+                    // If is_back_camera, convert from back camera frame to front camera frame by 180° rotation about Y and flipping the sign
+                    let back_corr = if compute_params.is_back_camera { -1.0 } else { 1.0 };
+                    Some(sign_corr * nalgebra::Vector3::new(tdir[0], back_corr * tdir[1], tdir[2]))
                 } else { None }
             } else { num_skipped += 1; None };
 

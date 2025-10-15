@@ -161,6 +161,16 @@ MenuItem {
                 currentLog.model = [];
             }
             currentLog.preventChange = false;
+
+            // Auto-run motion estimation after loading a new main video when motion direction alignment is enabled
+            if (is_main_video) {
+                try {
+                    const status = controller.get_motion_direction_status();
+                    if (status && status.length > 0 && window.videoArea.vid.loaded && !controller.sync_in_progress) {
+                        Qt.callLater(() => root.runMotionEstimation());
+                    }
+                } catch (e) { }
+            }
         }
         function onBias_estimated(biasX: real, biasY: real, biasZ: real): void {
             gyrobias.checked = true;

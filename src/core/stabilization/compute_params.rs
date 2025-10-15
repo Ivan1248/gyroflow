@@ -62,7 +62,9 @@ pub struct ComputeParams {
     pub digital_lens: Option<DistortionModel>,
     pub digital_lens_params: Option<Vec<f64>>,
     
-    pub pose_estimator: Arc<synchronization::PoseEstimator>
+    pub pose_estimator: Arc<synchronization::PoseEstimator>,
+
+    pub is_back_camera: bool,
 }
 impl ComputeParams {
     pub fn from_manager(mgr: &StabilizationManager) -> Self {
@@ -74,6 +76,8 @@ impl ComputeParams {
         let digital_lens = lens.digital_lens.as_ref().map(|x| DistortionModel::from_name(&x));
 
         let digital_lens_params = lens.digital_lens_params.clone();
+
+        let is_back_camera = crate::settings::get_str("dualStreamMode", "default") == "back";
 
         Self {
             gyro: mgr.gyro.clone(),
@@ -126,7 +130,9 @@ impl ComputeParams {
             keyframes: mgr.keyframes.read().clone(),
 
             zooming_debug_points: false,
-            pose_estimator: mgr.pose_estimator.clone()
+            pose_estimator: mgr.pose_estimator.clone(),
+
+            is_back_camera,
         }
     }
 
@@ -189,6 +195,7 @@ impl std::fmt::Debug for ComputeParams {
          .field("zooming_debug_points",      &self.zooming_debug_points)
          .field("distortion_model",          &self.distortion_model.id())
          .field("digital_lens",              &self.digital_lens.as_ref().map(|x| x.id()).unwrap_or("None"))
+         .field("is_back_camera",            &self.is_back_camera)
          .finish()
     }
 }
