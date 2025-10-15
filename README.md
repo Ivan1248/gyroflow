@@ -39,6 +39,42 @@ Checklist:
 
 ## How to run
 
+### Builds
+
+Built Linux and Windows executables can be downloaded from [Releases](https://github.com/Ivan1248/gyroflow/releases).
+
+The Linux build produces the following artifacts:
+- `Gyroflow-linux64.AppImage` - Portable AppImage executable
+- `Gyroflow-linux64.tar.gz` - Tar archive with executable and dependencies
+- `Gyroflow-1.6.3-x86_64.AppImage.zsync` - Zsync file for incremental updates
+
+### Running the AppImage
+
+1. Make the AppImage executable:
+   ```bash
+   chmod +x Gyroflow-linux64.AppImage
+   ```
+
+2. Run the application:
+   ```bash
+   ./Gyroflow-linux64.AppImage
+   ```
+
+The AppImage is self-contained and includes all necessary dependencies. No installation is required.
+
+### Running from tar.gz archive
+
+1. Extract the archive:
+   ```bash
+   tar -xzf Gyroflow-linux64.tar.gz
+   ```
+
+2. Run the application:
+   ```bash
+   ./Gyroflow/gyroflow
+   ```
+
+
 ### Motion direction alignment (single video)
 
 GUI:
@@ -197,39 +233,6 @@ output/
 │   └── gps_report.txt      # GPS sync report (from both calls)
 └── ...
 ```
-
-## Linux
-
-The Linux [build](https://github.com/Ivan1248/gyroflow/releases) produces the following artifacts:
-- `Gyroflow-linux64.AppImage` - Portable AppImage executable
-- `Gyroflow-linux64.tar.gz` - Tar archive with executable and dependencies
-- `Gyroflow-1.6.3-x86_64.AppImage.zsync` - Zsync file for incremental updates
-
-### Running the AppImage
-
-1. Make the AppImage executable:
-   ```bash
-   chmod +x Gyroflow-linux64.AppImage
-   ```
-
-2. Run the application:
-   ```bash
-   ./Gyroflow-linux64.AppImage
-   ```
-
-The AppImage is self-contained and includes all necessary dependencies. No installation is required.
-
-### Running from tar.gz archive
-
-1. Extract the archive:
-   ```bash
-   tar -xzf Gyroflow-linux64.tar.gz
-   ```
-
-2. Run the application:
-   ```bash
-   ./Gyroflow/gyroflow
-   ```
 
 
 ## Testing videos
