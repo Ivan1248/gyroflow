@@ -17,25 +17,26 @@ Requirements:
 _Potential additional requirements: equirectangular projection, added distoriton?_
 
 Checklist:
-- [ ] Motion direction correction/alignment  
+- [x] Motion direction correction/alignment  
   - [x] Motion direction estimation  
     - Optical flow PyrLK on 480p best, DIS on any resolution also good, PyrLK on higher resolutions bad.  
     - Relative pose estimation: essential matrix via LMedS.  
   - [x] Basic camera direction correction for forward-facing camera  
   - [x] Smoothing  
-  - [ ] Secondary (backward-camera) video stream support (for backward facing cameras)  
-  - [ ] Handling of non-translating camera
-- [ ] GPS synchronization  
+- [x] GPS synchronization  
   - [x] GPX loading  
   - [x] Synchronization  
     - [x] Manual  
     - [x] Automatic  
-      - [x] Using motion direction and smoothing  
-      - [ ] With improved interpolation  
+      - [x] Using motion direction and smoothing with speed threshold
   - [x] GPX saving  
-  - [ ] Method to determine when GPS synchronization doesn't work (e.g. due to no turns)
-- [ ] Batch processing
-- [ ] Equirectangular projection?
+  - [x] Method to determine when GPS synchronization doesn't work (e.g. due to no turns)
+	  - See results in tests below
+- [x] Batch processing
+- [ ] Secondary (backward-camera) video stream support (for backward facing cameras)
+  - Requires stitching
+  - [ ] Equirectangular projection?
+
 
 ## How to run
 
