@@ -15,6 +15,7 @@ use crate::util;
 use indicatif::{ProgressBar, MultiProgress, ProgressState, ProgressStyle};
 use gyroflow_core::filesystem;
 use gyroflow_core::filesystem::path_to_url;
+use gyroflow_core::gps::unwrap_angles_deg;
 
 cpp! {{
     struct TraitObject2 { void *data; void *vtable; };
@@ -125,9 +126,9 @@ struct Opts {
     #[argh(option)]
     export_gpx: Option<String>,
 
-    /// create GPS synchronization report file (gps_report.txt) with offset, similarity, and correlation information (requires --export-gpx)
-    #[argh(switch)]
-    gps_report: bool,
+    /// create GPS synchronization report file at specified path; contains offset, similarity, and correlation information (requires --export-gpx)
+    #[argh(option)]
+    report_gps: Option<String>,
 
     /// estimate motion from video (necessary for motion direction alignment)
     #[argh(switch)]
@@ -136,6 +137,14 @@ struct Opts {
     /// GPS settings JSON, e.g. "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'sample_rate_hz': 10 }"
     #[argh(option)]
     gps_settings: Option<String>,
+
+    /// create motion report file at specified path; contains avg_transl_dir and is_forward_stream (automatically enables motion estimation)
+    #[argh(option)]
+    report_motion: Option<String>,
+
+    /// select video stream for dual-stream cameras: 0/front, 1/back, or "stitched"
+    #[argh(option)]
+    stream: Option<String>,
 }
 
 pub fn will_run_in_console() -> bool {
@@ -158,6 +167,20 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
         if opts.version {
             println!("Gyroflow v{}", crate::util::get_version());
             return true;
+        }
+
+        // Apply dual-stream selection from CLI if provided
+        if let Some(ref stream) = opts.stream {
+            let m = stream.to_ascii_lowercase();
+            let mode = if m == "1" || m == "back" {
+                "back"
+            } else if m == "stitched" {
+                "stitched"
+            } else {
+                // treat any other value (including "0", "front", "default") as default/front
+                "default"
+            };
+            settings::set("dualStreamMode", serde_json::Value::String(mode.to_string()));
         }
 
         let absolute_paths: Vec<String> = opts.input.iter().map(|file| {
@@ -376,20 +399,53 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                     }
 
                                     // Create GPS synchronization report if requested
-                                    if opts.gps_report {
-                                        let report_path = std::path::PathBuf::from(export_gpx_path).parent().unwrap_or(std::path::Path::new(".")).join("gps_report.txt");
+                                    if let Some(ref report_path) = opts.report_gps {
                                         let sync_result = gps.sync_result.as_ref();
                                         let offset_s = sync_result.map(|r| r.time_offset_s).unwrap_or(gps.offset_ms / 1000.0);
                                         let similarity = sync_result.map(|r| r.similarity).unwrap_or(0.0);
                                         let correlation = sync_result.map(|r| r.correlation).unwrap_or(0.0);
-                                        match std::fs::write(&report_path, format!("offset: {}\nsimilarity: {}\ncorrelation: {}\n", offset_s, similarity, correlation)) {
-                                            Ok(_) => log::info!("[{:08x}] GPS report saved to: {}", job_id, report_path.display()),
+                                        let course_range = if !track.is_empty() {
+                                            let course_raw = track.get_course_deg();
+                                            let course_unwrapped = unwrap_angles_deg(&course_raw);
+                                            if course_unwrapped.is_empty() {
+                                                0.0
+                                            } else {
+                                                let min_course = course_unwrapped.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                                                let max_course = course_unwrapped.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                                                max_course - min_course
+                                            }
+                                        } else {
+                                            0.0
+                                        };
+                                        match std::fs::write(&report_path, format!("offset: {}\nsimilarity: {}\ncorrelation: {}\ncourse_range: {}\n", offset_s, similarity, correlation, course_range)) {
+                                            Ok(_) => log::info!("[{:08x}] GPS report saved to: {}", job_id, report_path),
                                             Err(e) => log::error!("[{:08x}] Failed to save GPS report: {}", job_id, e),
                                         }
                                     }
                                 } else {
                                     log::warn!("[{:08x}] No GPS track loaded, cannot export GPX", job_id);
                                 }
+                            }
+                        }
+                        // Create motion report if requested
+                        if let Some(ref motion_report_path) = opts.report_motion {
+                            if let Some(stab) = queue.get_stab_for_job(*job_id) {
+                                // Use entire available range to compute average translation direction
+                                let ranges = stab.pose_estimator.get_ranges();
+                                let mut dirs: Vec<[f64; 3]> = Vec::new();
+                                for (start, end) in ranges {
+                                    let mid = (start + end) / 2;
+                                    if let Some((tdir, _q)) = stab.pose_estimator.get_transl_dir_near(mid, end - start, true) {
+                                        dirs.push(tdir);
+                                    }
+                                }
+                                let avg = if dirs.is_empty() { [0.0, 0.0, 0.0] } else {
+                                    let mut s = [0.0, 0.0, 0.0];
+                                    for d in &dirs { s[0]+=d[0]; s[1]+=d[1]; s[2]+=d[2]; }
+                                    let n = dirs.len() as f64; [s[0]/n, s[1]/n, s[2]/n]
+                                };
+                                let is_forward_stream = (avg[2] <= 0.0) as i32;
+                                let _ = std::fs::write(motion_report_path, format!("avg_transl_dir: ({:.6}, {:.6}, {:.6})\nis_forward_stream: {}\n", avg[0], avg[1], avg[2], is_forward_stream));
                             }
                         }
                         
@@ -561,7 +617,7 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                         .as_array()
                         .map_or(false, |arr| !arr.is_empty());
 
-                    if opts.estimate_motion || motion_dir_enabled {
+                    if opts.estimate_motion || motion_dir_enabled || opts.report_motion.is_some() {
                         log::info!("[{:08x}] Estimating motion from video...", job_id);
 
                         let input_file = stab.input_file.read().clone();
