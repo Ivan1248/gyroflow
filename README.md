@@ -1,17 +1,17 @@
 ## Modified Gyroflow
 
 This repository contains a modified version of [Gyroflow](https://github.com/gyroflow/gyroflow) with the following functionality added:
-- motion direction alignment – the virtual camera is pointed in the direction of motion estimated via relative pose estimation,
-- GPS synchronization – GPX files can be loaded, synchronized with the motion estimated from IMU data and motion direction alignment,
+- Motion direction alignment – the virtual camera is pointed in the direction of motion estimated using relative pose estimation. Using the back camera stream is supported.
+- GPS synchronization – GPX files can be loaded, synchronized with the motion estimated from IMU data and motion direction alignment.
 - GPS data visualization – a simple map and GPS course angle alignment chart option in the timeline.
 
 ## Data extraction from omnidirectional videos
 
-The videos have been recorded with head-mounted omnidirectional cameras. They contain gyroscope and accelerometer (IMU) data and unsynchronized GPS data.
+Our videos have been recorded with head-mounted omnidirectional cameras. They contain gyroscope and accelerometer (IMU) data and unsynchronized GPS data.
 
 Requirements:
 - Transform fisheye projection to perspective projection with 127° field of view.
-- Correct the camera direction (optical axis) to point along the motion direction.
+- Correct the camera direction (optical axis) to point along the forward motion direction.
 - Synchronize GPS tracks with the video (IMU).
 
 _Potential additional requirements: equirectangular projection, added distoriton?_
@@ -33,8 +33,9 @@ Checklist:
   - [x] Method to determine when GPS synchronization doesn't work (e.g. due to no turns)
 	  - See results in tests below
 - [x] Batch processing
-- [ ] Secondary (backward-camera) video stream support (for backward facing cameras)
-  - Requires stitching
+- [x] Secondary (backward-camera) video stream support (for backward facing cameras)
+  - [x] CLI support for stream selection (`--stream 0/1`)
+  - [x] Stitching of front and back video streams
   - [ ] Equirectangular projection?
 
 
@@ -108,9 +109,12 @@ CLI:
 
 **Step 2: Process video with motion estimation:**
 ```bash
-gyroflow video.mp4 --preset preset.json -p "{'output_path': '/path/to/output.mp4'}"
+gyroflow video.mp4 --preset preset.json -p '{ "output_path": "/path/to/output.mp4" }' --report-motion motion_report.txt
 ```
-The last argument is optional.
+The `-p` and `--report-motion` arguments are optional.
+
+**Motion report generation:**
+- `--report-motion <path>`: creates a motion report file containing the average translation direction and the index of the forward looking video stream (based on relative pose estimation)
 
 
 ### GPS synchronization (single video)
@@ -152,20 +156,39 @@ The preset file can be the same as before, but only the following is necessary:
 gyroflow video.mp4 \
   --preset preset.json \  # should have motion_direction_enabled and "Plain 3D" smoothing
   --input-gpx track.gpx \
-  --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'max_time_offset_s': 5.0 }" \
-  -p "{'output_path': '/outputs/stabilized.mp4'}" \
+  --gps-settings '{ "sync_mode": "auto", "use_processed_motion": true, "speed_threshold": 1.5, "max_time_offset_s": 5.0 }' \
+  -p '{ "output_path": "/outputs/stabilized.mp4" }' \
   --export-gpx /outputs/synchronized.gpx \
-  --gps-report
+  --report-gps /outputs/gps_report.txt \
+  --stream 0
 ```
 
 This will:
 1. Load the GPX track file (`--input-gpx track.gpx`)
 2. Synchronize the GPS data using the processed motion direction and provided GPS settings
 3. Export the synchronized GPX file (`--export-gpx synchronized.gpx`)
-4. Create a GPS synchronization report file (`gps_report.txt`) with offset, similarity, and correlation information (`--gps-report`, requires `--export-gpx`)
+4. Create a GPS synchronization report with offset, similarity, correlation, and course range information (`--report-gps <path>`, requires `--export-gpx`)
+5. Use the first video stream (`--stream 0`)
 
 GPS synchronization settings:
-- `max_time_offset_s`: Maximum allowed time offset
+- `max_time_offset_s`: maximum allowed time offset
+
+### CLI Options Reference
+
+#### Dual-stream video processing
+- `--stream <mode>`: Select video stream
+  - `0` or `front` (default): Use front/default camera stream
+  - `1` or `back`: Use back camera stream
+  - `stitched`: use stitched dual-stream mode (not implemented)
+
+#### Motion analysis and reporting
+- `--report-motion <path>`: Create motion report file with average translation direction and forward stream information
+
+#### GPS synchronization and reporting
+- `--input-gpx <file>`: Load GPX track file for synchronization
+- `--export-gpx <path>`: Export synchronized GPX file
+- `--gps-settings <json>`: GPS synchronization settings (sync_mode, use_processed_motion, speed_threshold, max_time_offset_s, sample_rate_hz)
+- `--report-gps <path>`: Generate GPS synchronization report with offset, similarity, correlation, and course range information
 
 ### Batch processing: motion direction alignment and GPS synchronization
 
@@ -186,32 +209,52 @@ output_root="output"
 output_root_abs=$(realpath $output_root)
 
 # Define preset configurations
-preset='{ "version": 2, "stabilization": { "fov": 3.222, "method": "Plain 3D", "smoothing_params": [{"name": "time_constant", "value": 1.0}], "horizon_lock_amount": 1.0, "motion_direction_enabled": true, "motion_direction_params": [{"name": "flip_backward_dir", "value": false}] }, "output": { "width": 960, "height": 540 } }'
-preset_back='{ "version": 2, "stabilization": { "fov": 3.222, "method": "Plain 3D", "smoothing_params": [{"name": "time_constant", "value": 1.0}], "horizon_lock_amount": 1.0, "motion_direction_enabled": true, "motion_direction_params": [{"name": "flip_backward_dir", "value": true}] }, "output": { "width": 960, "height": 540 } }'
+preset='{ "version": 2, "stabilization": { "fov": 3.222, "method": "Plain 3D", "smoothing_params": [{"name": "time_constant", "value": 1.0}], "horizon_lock_amount": 1.0, "motion_direction_enabled": true, "motion_direction_params": [{"name": "flip_backward_dir", "value": false}] }, "output": { "width": 1280, "height": 920 } }'
 
 # Process all subdirectories containing INSV and GPX files
 for rec_dir in "$input_root"/*/; do
     if [ -d "$rec_dir" ]; then
         rec_name=$(basename "$rec_dir")
         out_dir="${output_root_abs}/$rec_name"
-        mkdir -p $out_dir
         
         vid_file=$(find "$rec_dir" -name "*.insv" | head -1)
         gpx_file=$(find "$rec_dir" -name "*.gpx" | head -1)
-
         if [ -f "$vid_file" ] && [ -f "$gpx_file" ]; then
             echo "Processing: $rec_name"
+            mkdir -p $out_dir
             vid_name=$(basename "$vid_file" .insv)
-            # Look at the motion direction; synchronize GPS time
-            export LD_LIBRARY_PATH="/home/igrubisic/projects/gyroflow/target/release:/home/igrubisic/projects/gyroflow/ext/6.4.3/gcc_64/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib/amd64" && /home/igrubisic/apps/Gyroflow/gyroflow "$vid_file" \
-              --preset "$preset" \
-              -p "{'output_folder': '${out_dir}/', 'output_filename': '${vid_name}.mp4'}" \
-              --input-gpx "$gpx_file" \
-              --gps-settings "{ 'sync_mode': 'auto', 'use_processed_motion': true, 'speed_threshold': 1.5, 'max_time_offset_s': 5.0 }" \
-              --export-gpx "${out_dir}/${vid_name}.gpx" \
-              --gps-report
-            # Look back if moving backward
-            gyroflow "$vid_file" --preset "$preset_back" -p "{'output_folder': '${output_root_abs}/$rec_name/', 'output_filename': '${vid_name}_back.mp4'}"
+            out_stem="${out_dir}/${vid_name}"
+
+            # Align virtual camera with forward motion direction; synchronize GPS time
+            for stream in 0 1; do
+                export LD_LIBRARY_PATH="/home/igrubisic/projects/gyroflow/target/release:/home/igrubisic/projects/gyroflow/ext/6.4.3/gcc_64/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib/amd64" && /home/igrubisic/projects/gyroflow/target/release/gyroflow "$vid_file" \
+                  --stream $stream \
+                  --preset "$preset" \
+                  -p "{ \"output_path\": \"${out_stem}${stream}.mp4\" }" \
+                  --input-gpx "$gpx_file" \
+                  --gps-settings '{ "sync_mode": "auto", "use_processed_motion": true, "speed_threshold": 1.5, "max_time_offset_s": 5.0 }' \
+                  --export-gpx "${out_stem}${stream}.gpx" \
+                  --report-motion "${out_stem}_motion${stream}.txt" \
+                  --report-gps "${out_stem}_gps${stream}.txt"
+
+                # If this does not have forward motion, delete it. Otherwise, rename it to "${out_stem}.mp4"
+                if grep -q "is_forward_stream: 1" "${out_stem}_motion${stream}.txt" 2>/dev/null; then
+                    echo "Stream $stream has forward motion, using this stream"
+                    fwd_stream=$stream
+                else
+                    echo "Stream $stream does not have forward motion, deleting files except the GPS report"
+                    rm -f "${out_stem}${stream}.mp4" "${out_stem}${stream}.gpx"
+                fi
+            done
+
+            # Rename files from the stream with forward motion
+            if [ -n "$fwd_stream" ]; then
+                mv "${out_stem}${fwd_stream}.mp4" "${out_stem}.mp4"
+                mv "${out_stem}${fwd_stream}.gpx" "${out_stem}.gpx"
+                mv "${out_stem}_motion${fwd_stream}.txt" "${out_stem}_motion.txt"
+                mv "${out_stem}_gps${fwd_stream}.txt" "${out_stem}_gps.txt"
+                echo "Renamed files from stream $fwd_stream to final output"
+            fi
         else
             echo "Skipping $rec_name: missing INSV or GPX file"
         fi
@@ -223,15 +266,15 @@ done
 ```
 output/
 ├── session1/
-│   ├── video1.mp4          # original preset (flip_backward_dir: false)
-│   ├── video1_back.mp4     # flipped preset (flip_backward_dir: true)
+│   ├── video1.mp4          # Forward motion direction-aligned video
 │   ├── video1.gpx          # synchronized GPX (from first call)
-│   └── gps_report.txt      # GPS sync report (from both calls)
+│   ├── video1_gps.txt      # GPS sync report (from both calls)
+│   └── video1_motion.txt   # motion report with avg_transl_dir and fwd_stream
 ├── session2/
-│   ├── video2.mp4          # original preset (flip_backward_dir: false)
-│   ├── video2_back.mp4     # flipped preset (flip_backward_dir: true)
-│   ├── video2.gpx          # synchronized GPX (from first call)
-│   └── gps_report.txt      # GPS sync report (from both calls)
+│   ├── video2.mp4
+│   ├── video2.gpx
+│   ├── video2_gps.txt
+│   └── video2_motion.txt
 └── ...
 ```
 
