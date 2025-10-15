@@ -228,7 +228,7 @@ for rec_dir in "$input_root"/*/; do
 
             # Align virtual camera with forward motion direction; synchronize GPS time
             for stream in 0 1; do
-                export LD_LIBRARY_PATH="/home/igrubisic/projects/gyroflow/target/release:/home/igrubisic/projects/gyroflow/ext/6.4.3/gcc_64/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib/amd64" && /home/igrubisic/projects/gyroflow/target/release/gyroflow "$vid_file" \
+                gyroflow "$vid_file" \
                   --stream $stream \
                   --preset "$preset" \
                   --overwrite \
