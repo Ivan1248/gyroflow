@@ -158,6 +158,7 @@ gyroflow video.mp4 \
   --input-gpx track.gpx \
   --gps-settings '{ "sync_mode": "auto", "use_processed_motion": true, "speed_threshold": 1.5, "max_time_offset_s": 5.0 }' \
   -p '{ "output_path": "/outputs/stabilized.mp4" }' \
+  --overwrite \
   --export-gpx /outputs/synchronized.gpx \
   --report-gps /outputs/gps_report.txt \
   --stream 0
@@ -230,6 +231,7 @@ for rec_dir in "$input_root"/*/; do
                 export LD_LIBRARY_PATH="/home/igrubisic/projects/gyroflow/target/release:/home/igrubisic/projects/gyroflow/ext/6.4.3/gcc_64/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib:/home/igrubisic/projects/gyroflow/ext/ffmpeg-8.0-linux-clang-gpl-lite/lib/amd64" && /home/igrubisic/projects/gyroflow/target/release/gyroflow "$vid_file" \
                   --stream $stream \
                   --preset "$preset" \
+                  --overwrite \
                   -p "{ \"output_path\": \"${out_stem}${stream}.mp4\" }" \
                   --input-gpx "$gpx_file" \
                   --gps-settings '{ "sync_mode": "auto", "use_processed_motion": true, "speed_threshold": 1.5, "max_time_offset_s": 5.0 }' \
@@ -242,17 +244,17 @@ for rec_dir in "$input_root"/*/; do
                     echo "Stream $stream has forward motion, using this stream"
                     fwd_stream=$stream
                 else
-                    echo "Stream $stream does not have forward motion, deleting files except the GPS report"
+                    echo "Stream $stream does not have forward motion, deleting files except reports"
                     rm -f "${out_stem}${stream}.mp4" "${out_stem}${stream}.gpx"
                 fi
             done
 
             # Rename files from the stream with forward motion
             if [ -n "$fwd_stream" ]; then
-                mv "${out_stem}${fwd_stream}.mp4" "${out_stem}.mp4"
-                mv "${out_stem}${fwd_stream}.gpx" "${out_stem}.gpx"
-                mv "${out_stem}_motion${fwd_stream}.txt" "${out_stem}_motion.txt"
-                mv "${out_stem}_gps${fwd_stream}.txt" "${out_stem}_gps.txt"
+                mv -f "${out_stem}${fwd_stream}.mp4" "${out_stem}.mp4"
+                mv -f "${out_stem}${fwd_stream}.gpx" "${out_stem}.gpx"
+                mv -f "${out_stem}_motion${fwd_stream}.txt" "${out_stem}_motion.txt"
+                mv -f "${out_stem}_gps${fwd_stream}.txt" "${out_stem}_gps.txt"
                 echo "Renamed files from stream $fwd_stream to final output"
             fi
         else

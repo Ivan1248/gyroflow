@@ -393,9 +393,13 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                 if let Some(track) = gps.track.as_ref() {
                                     let video_start_time = stab.params.read().video_created_at.unwrap_or(0) as f64;
                                     let offset = gps.offset_ms / 1000.0;
-                                    match gyroflow_core::gps::save_gpx_file(export_gpx_path, video_start_time + offset, track) {
-                                        Ok(_) => log::info!("[{:08x}] GPX exported successfully", job_id),
-                                        Err(e) => log::error!("[{:08x}] Failed to export GPX: {}", job_id, e),
+                                    if std::path::Path::new(export_gpx_path).exists() && !opts.overwrite {
+                                        log::error!("[{:08x}] GPX file {} already exists. Use --overwrite to overwrite it.", job_id, export_gpx_path);
+                                    } else {
+                                        match gyroflow_core::gps::save_gpx_file(export_gpx_path, video_start_time + offset, track) {
+                                            Ok(_) => log::info!("[{:08x}] GPX exported successfully", job_id),
+                                            Err(e) => log::error!("[{:08x}] Failed to export GPX: {}", job_id, e),
+                                        }
                                     }
 
                                     // Create GPS synchronization report if requested
@@ -417,9 +421,13 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                         } else {
                                             0.0
                                         };
-                                        match std::fs::write(&report_path, format!("offset: {}\nsimilarity: {}\ncorrelation: {}\ncourse_range: {}\n", offset_s, similarity, correlation, course_range)) {
-                                            Ok(_) => log::info!("[{:08x}] GPS report saved to: {}", job_id, report_path),
-                                            Err(e) => log::error!("[{:08x}] Failed to save GPS report: {}", job_id, e),
+                                        if std::path::Path::new(&report_path).exists() && !opts.overwrite {
+                                            log::error!("[{:08x}] GPS report file {} already exists. Use --overwrite to overwrite it.", job_id, report_path);
+                                        } else {
+                                            match std::fs::write(&report_path, format!("offset: {}\nsimilarity: {}\ncorrelation: {}\ncourse_range: {}\n", offset_s, similarity, correlation, course_range)) {
+                                                Ok(_) => log::info!("[{:08x}] GPS report saved to: {}", job_id, report_path),
+                                                Err(e) => log::error!("[{:08x}] Failed to save GPS report: {}", job_id, e),
+                                            }
                                         }
                                     }
                                 } else {
@@ -445,7 +453,14 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                     let n = dirs.len() as f64; [s[0]/n, s[1]/n, s[2]/n]
                                 };
                                 let is_forward_stream = (avg[2] <= 0.0) as i32;
-                                let _ = std::fs::write(motion_report_path, format!("avg_transl_dir: ({:.6}, {:.6}, {:.6})\nis_forward_stream: {}\n", avg[0], avg[1], avg[2], is_forward_stream));
+                                if std::path::Path::new(motion_report_path).exists() && !opts.overwrite {
+                                    log::error!("[{:08x}] Motion report file {} already exists. Use --overwrite to overwrite it.", job_id, motion_report_path);
+                                } else {
+                                    match std::fs::write(motion_report_path, format!("avg_transl_dir: ({:.6}, {:.6}, {:.6})\nis_forward_stream: {}\n", avg[0], avg[1], avg[2], is_forward_stream)) {
+                                        Ok(_) => log::info!("[{:08x}] Motion report saved to: {}", job_id, motion_report_path),
+                                        Err(e) => log::error!("[{:08x}] Failed to save motion report: {}", job_id, e),
+                                    }
+                                }
                             }
                         }
                         
