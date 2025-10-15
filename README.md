@@ -78,7 +78,8 @@ The last argument is optional.
 
 ### GPS synchronization (single video)
 
-**GUI:**
+#### GUI
+
 1. Run Gyroflow.
 2. Load the video.
 3. In the "Stabilization" section:
@@ -93,10 +94,10 @@ The last argument is optional.
 	5. Set GPS speed threshold to 1.5 m/s.
 	6. Once the analysis is complete, save the aligned GPX file, click on the "Export" link to open a menu and click "Export synchronized GPX".
 
-**CLI:**
+#### CLI
 
-**Step 1: Create a preset file** (e.g., `preset.json`):
-The preset file can be the same as before, but only the following is necessary for better GPS synchronization:
+**1. Create a preset file** (e.g., `preset.json`):
+The preset file can be the same as before, but only the following is necessary:
 ```json
 {
   "version": 2,
@@ -108,8 +109,8 @@ The preset file can be the same as before, but only the following is necessary f
 }
 ```
 
-**Step 2: Process video and synchronize the GPS track with the video:**
-**Specifying output paths:**
+**2. Process video and synchronize the GPS track with the video:**
+
 ```bash
 gyroflow video.mp4 \
   --preset preset.json \  # should have motion_direction_enabled and "Plain 3D" smoothing
@@ -127,9 +128,7 @@ This will:
 4. Create a GPS synchronization report file (`gps_report.txt`) with offset, similarity, and correlation information (`--gps-report`, requires `--export-gpx`)
 
 GPS synchronization settings:
-- `max_time_offset_s`: Maximum allowed time offset in seconds (default: 10.0, recommended: 5.0 to prevent incorrect synchronization)
-
-The GPS synchronization will output the time offset in milliseconds and the correlation coefficient to help assess synchronization quality.
+- `max_time_offset_s`: Maximum allowed time offset
 
 ### Batch processing: motion direction alignment and GPS synchronization
 
@@ -175,7 +174,7 @@ for rec_dir in "$input_root"/*/; do
               --export-gpx "${out_dir}/${vid_name}.gpx" \
               --gps-report
             # Look back if moving backward
-            #gyroflow "$vid_file" --preset "$preset_back" -p "{'output_folder': '${output_root_abs}/$rec_name/', 'output_filename': '${vid_name}_back.mp4'}"
+            gyroflow "$vid_file" --preset "$preset_back" -p "{'output_folder': '${output_root_abs}/$rec_name/', 'output_filename': '${vid_name}_back.mp4'}"
         else
             echo "Skipping $rec_name: missing INSV or GPX file"
         fi
@@ -188,12 +187,12 @@ done
 output/
 ├── session1/
 │   ├── video1.mp4          # original preset (flip_backward_dir: false)
-│   ├── video1_flip.mp4     # flipped preset (flip_backward_dir: true)
+│   ├── video1_back.mp4     # flipped preset (flip_backward_dir: true)
 │   ├── video1.gpx          # synchronized GPX (from first call)
 │   └── gps_report.txt      # GPS sync report (from both calls)
 ├── session2/
 │   ├── video2.mp4          # original preset (flip_backward_dir: false)
-│   ├── video2_flip.mp4     # flipped preset (flip_backward_dir: true)
+│   ├── video2_back.mp4     # flipped preset (flip_backward_dir: true)
 │   ├── video2.gpx          # synchronized GPX (from first call)
 │   └── gps_report.txt      # GPS sync report (from both calls)
 └── ...
@@ -201,7 +200,7 @@ output/
 
 ## Linux
 
-The Linux build produces the following artifacts:
+The Linux [build](https://github.com/Ivan1248/gyroflow/releases) produces the following artifacts:
 - `Gyroflow-linux64.AppImage` - Portable AppImage executable
 - `Gyroflow-linux64.tar.gz` - Tar archive with executable and dependencies
 - `Gyroflow-1.6.3-x86_64.AppImage.zsync` - Zsync file for incremental updates
@@ -232,11 +231,6 @@ The AppImage is self-contained and includes all necessary dependencies. No insta
    ./Gyroflow/gyroflow
    ```
 
-### CLI usage on Linux
-
-All CLI commands shown in the sections above work identically on Linux. Use the appropriate executable:
-- From AppImage: `./Gyroflow-linux64.AppImage [args]`
-- From tar.gz: `./Gyroflow/gyroflow [args]`
 
 ## Testing videos
 
@@ -271,9 +265,11 @@ All CLI commands shown in the sections above work identically on Linux. Use the 
 | 20241214_unit1_566_567     | 6.1             | .160                | 7.8                      | 0.856 |      | **Straight path – GPS sync fails**, delays incorrect                                | 1     |  
 
 Correct offsets (estimate): 20/24.  
-Error guesses ($\rho<0.45$):
+
+Error guesses ($\rho<0.45$):  
 - TP=4, TN=14, FP=6, FN=0
-- $P=0.4$, $R=1$
+- $P=0.4$, $R=1$  
+
 Confidently correct without human checking: 14/24.
 
 ## Other notes
