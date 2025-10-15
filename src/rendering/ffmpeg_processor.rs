@@ -134,7 +134,132 @@ pub struct VideoInfo {
 }
 
 impl<'a> FfmpegProcessor<'a> {
-    pub fn from_file(base: &'a EngineBase, url: &str, mut gpu_decoding: bool, gpu_decoder_index: usize, mut decoder_options: Option<Dictionary>) -> Result<Self, FFmpegError> {
+    pub fn list_video_streams(base: &'a EngineBase, url: &str) -> Result<Vec<usize>, FFmpegError> {
+        let mut file = FfmpegPathWrapper::new(base, url, false).map_err(|e| FFmpegError::CannotOpenInputFile((url.to_string(), e)))?;
+        let mut dict = Dictionary::new();
+        if file.path.starts_with("fd:") { dict.set("fd", &file.path[3..]); file.path = "fd:".into(); }
+        let ctx = format::input_with_dictionary(&file.path, dict)?;
+        let mut out = Vec::new();
+        for (i, s) in ctx.streams().enumerate() {
+            if s.parameters().medium() == media::Type::Video { out.push(i); }
+        }
+        Ok(out)
+    }
+
+    fn maybe_android_decoder_override(mut decoder: *const ffi::AVCodec, codec_id: ffi::AVCodecID, gpu_decoding: bool) -> *const ffi::AVCodec {
+        if gpu_decoding && cfg!(target_os = "android") {
+            let decoder_name = match codec_id {
+                ffi::AVCodecID::AV_CODEC_ID_H264 => Some("h264_mediacodec"),
+                ffi::AVCodecID::AV_CODEC_ID_HEVC => Some("hevc_mediacodec"),
+                ffi::AVCodecID::AV_CODEC_ID_VP8  => Some("vp8_mediacodec"),
+                ffi::AVCodecID::AV_CODEC_ID_VP9  => Some("vp9_mediacodec"),
+                ffi::AVCodecID::AV_CODEC_ID_AV1  => Some("av1_mediacodec"),
+                _ => None
+            };
+            if let Some(name) = decoder_name {
+                let name = std::ffi::CString::new(name).unwrap();
+                let mc_ptr = unsafe { ffi::avcodec_find_decoder_by_name(name.as_ptr()) };
+                if !mc_ptr.is_null() {
+                    decoder = mc_ptr;
+                }
+            }
+        }
+        decoder
+    }
+
+    fn get_stream_and_decoder(
+        input_context: &mut format::context::Input,
+        gpu_decoding: bool,
+        stream_index: Option<usize>,
+    ) -> Result<(Stream<'_>, *const ffi::AVCodec), FFmpegError> {
+        if let Some(index) = stream_index {
+            let stream = input_context.stream(index).ok_or(Error::StreamNotFound)?;
+            ::log::info!("Selected stream index: {}", index);
+            if stream.parameters().medium() != media::Type::Video { return Err(Error::StreamNotFound.into()); }
+            // Find decoder for this specific stream
+            let codec_id = stream.parameters().id();
+            ::log::info!("Selected codec ID: {:?}", codec_id);
+            let decoder = unsafe { ffi::avcodec_find_decoder(codec_id.into()) };
+            if decoder.is_null() {
+                return Err(FFmpegError::DecoderNotFound);
+            }
+            let decoder = Self::maybe_android_decoder_override(decoder, codec_id.into(), gpu_decoding);
+            ::log::info!("Selected decoder: {:?}", decoder);
+            Ok((stream, decoder))
+        } else {
+            // Best video stream according to libavformat
+            let (stream, decoder) = unsafe {
+                let mut decoder: *const ffi::AVCodec = std::ptr::null();
+                let index = ffi::av_find_best_stream(input_context.as_mut_ptr(), media::Type::Video.into(), -1i32, -1i32, &mut decoder, 0);
+                if index >= 0 && !decoder.is_null() {
+                    let decoder = Self::maybe_android_decoder_override(decoder, (*decoder).id, gpu_decoding);
+                    (Stream::wrap(input_context, index as usize), decoder)
+                } else {
+                    return Err(Error::StreamNotFound.into());
+                }
+            };
+            ::log::info!("Selected stream index: {}", stream.index());
+            Ok((stream, decoder))
+        }
+    }
+
+    fn from_context(
+        mut file: FfmpegPathWrapper<'a>,
+        mut input_context: format::context::Input,
+        mut gpu_decoding: bool,
+        gpu_decoder_index: usize,
+        hwaccel_device: Option<String>,
+        stream_index: Option<usize>,
+    ) -> Result<Self, FFmpegError> {
+        let (stream, decoder) = Self::get_stream_and_decoder(&mut input_context, gpu_decoding, stream_index)?;
+
+        let decoder_fps = stream.rate().into();
+
+        let mut decoder_ctx = unsafe { codec::context::Context::wrap(ffi::avcodec_alloc_context3(decoder), None) };
+        unsafe {
+            if ffi::avcodec_parameters_to_context(decoder_ctx.as_mut_ptr(), stream.parameters().as_ptr()) < 0 {
+                ::log::error!("avcodec_parameters_to_context failed");
+                return Err(FFmpegError::DecoderNotFound);
+            }
+        }
+        decoder_ctx.set_threading(ffmpeg_next::threading::Config { kind: ffmpeg_next::threading::Type::Frame, count: 5 });
+
+        let decoder_codec = decoder_ctx.codec().ok_or(FFmpegError::DecoderNotFound)?;
+
+        let mut hw_backend = String::new();
+        if gpu_decoding {
+            let hw = ffmpeg_hw::init_device_for_decoding(gpu_decoder_index, unsafe { decoder_codec.as_ptr() }, &mut decoder_ctx, hwaccel_device.as_deref())?;
+            log::debug!("Selected HW backend {:?} ({}) with format {:?}", hw.1, hw.2, hw.3);
+            hw_backend = hw.2;
+        }
+        gpu_decoding = !hw_backend.is_empty();
+
+        Ok(Self {
+            _file: file,
+            gpu_decoding,
+            gpu_device: if !gpu_decoding { None } else { Some(hw_backend) },
+            video_codec: None,
+            audio_codec: codec::Id::AAC,
+            ost_time_bases: Vec::new(),
+            frame_ts: Default::default(),
+            ranges_ms: Vec::new(),
+            preserve_other_tracks: false,
+            decoder_fps,
+            #[cfg(target_os = "android")]
+            android_handles: None,
+            video: VideoTranscoder {
+                gpu_encoding: true,
+                gpu_decoding,
+                input_index: stream.index(),
+                encoder_params: EncoderParams { options: Dictionary::new(), ..EncoderParams::default() },
+                decoder: Some(decoder_ctx.decoder().open_as(decoder_codec)?.video()?),
+                ..VideoTranscoder::default()
+            },
+            input_context,
+        })
+    }
+
+    pub fn from_file_with_video_stream_index(base: &'a EngineBase, url: &str, gpu_decoding: bool, gpu_decoder_index: usize, mut decoder_options: Option<Dictionary>, video_stream_index: Option<usize>) -> Result<Self, FFmpegError> {
         let mut file = FfmpegPathWrapper::new(base, url, false).map_err(|e| FFmpegError::CannotOpenInputFile((url.to_string(), e)))?;
 
         ffmpeg_next::init()?;
@@ -148,97 +273,12 @@ impl<'a> FfmpegProcessor<'a> {
             }
         }
 
-        let mut input_context = decoder_options.map_or_else(|| format::input(&file.path), |dict| format::input_with_dictionary(&file.path, dict))?;
+        let input_context = decoder_options.map_or_else(|| format::input(&file.path), |dict| format::input_with_dictionary(&file.path, dict))?;
+        Self::from_context(file, input_context, gpu_decoding, gpu_decoder_index, hwaccel_device, video_stream_index)
+    }
 
-        // format::context::input::dump(&input_context, 0, Some(file.path));
-
-        let best_video_stream = unsafe {
-            let mut decoder: *const ffi::AVCodec = std::ptr::null();
-            let index = ffi::av_find_best_stream(input_context.as_mut_ptr(), media::Type::Video.into(), -1i32, -1i32, &mut decoder, 0);
-            if index >= 0 && !decoder.is_null() {
-                if gpu_decoding && cfg!(target_os = "android") {
-                    let decoder_name = match (*decoder).id {
-                        ffi::AVCodecID::AV_CODEC_ID_H264 => Some("h264_mediacodec"),
-                        ffi::AVCodecID::AV_CODEC_ID_HEVC => Some("hevc_mediacodec"),
-                        ffi::AVCodecID::AV_CODEC_ID_VP8  => Some("vp8_mediacodec"),
-                        ffi::AVCodecID::AV_CODEC_ID_VP9  => Some("vp9_mediacodec"),
-                        ffi::AVCodecID::AV_CODEC_ID_AV1  => Some("av1_mediacodec"),
-                        _ => None
-                    };
-                    if let Some(name) = decoder_name {
-                        let name = std::ffi::CString::new(name).unwrap();
-                        let mc_ptr = ffi::avcodec_find_decoder_by_name(name.as_ptr());
-                        if !mc_ptr.is_null() {
-                            decoder = mc_ptr;
-                        }
-                    }
-                }
-                Ok((Stream::wrap(&input_context, index as usize), decoder))
-            } else {
-                Err(Error::StreamNotFound)
-            }
-        };
-
-        let strm = best_video_stream?;
-        let stream = strm.0;
-        let decoder = strm.1;
-
-        let decoder_fps = stream.rate().into();
-
-        let mut decoder_ctx = unsafe { codec::context::Context::wrap(ffi::avcodec_alloc_context3(decoder), None) };
-        unsafe {
-            if ffi::avcodec_parameters_to_context(decoder_ctx.as_mut_ptr(), stream.parameters().as_ptr()) < 0 {
-                ::log::error!("avcodec_parameters_to_context failed");
-                return Err(FFmpegError::DecoderNotFound);
-            }
-        }
-        decoder_ctx.set_threading(ffmpeg_next::threading::Config { kind: ffmpeg_next::threading::Type::Frame, count: 5 });
-
-        let codec = decoder_ctx.codec().ok_or(FFmpegError::DecoderNotFound)?;
-
-        let mut hw_backend = String::new();
-        if gpu_decoding {
-            let hw = ffmpeg_hw::init_device_for_decoding(gpu_decoder_index, unsafe { codec.as_ptr() }, &mut decoder_ctx, hwaccel_device.as_deref())?;
-            log::debug!("Selected HW backend {:?} ({}) with format {:?}", hw.1, hw.2, hw.3);
-            hw_backend = hw.2;
-        }
-        gpu_decoding = !hw_backend.is_empty();
-
-        Ok(Self {
-            _file: file,
-            gpu_decoding,
-            gpu_device: if !gpu_decoding { None } else { Some(hw_backend) },
-            video_codec: None,
-
-            audio_codec: codec::Id::AAC,
-
-            ost_time_bases: Vec::new(),
-
-            frame_ts: Default::default(),
-
-            ranges_ms: Vec::new(),
-
-            preserve_other_tracks: false,
-
-            decoder_fps,
-
-            #[cfg(target_os = "android")]
-            android_handles: None,//if gpu_decoding { AndroidHWHandles::init_with_context(&mut decoder_ctx).ok() } else { None },
-
-            video: VideoTranscoder {
-                gpu_encoding: true,
-                gpu_decoding,
-                input_index: stream.index(),
-                encoder_params: EncoderParams {
-                    options: Dictionary::new(),
-                    ..EncoderParams::default()
-                },
-                decoder: Some(decoder_ctx.decoder().open_as(codec)?.video()?),
-                ..VideoTranscoder::default()
-            },
-
-            input_context,
-        })
+    pub fn from_file(base: &'a EngineBase, url: &str, gpu_decoding: bool, gpu_decoder_index: usize, decoder_options: Option<Dictionary>) -> Result<Self, FFmpegError> {
+        Self::from_file_with_video_stream_index(base, url, gpu_decoding, gpu_decoder_index, decoder_options, None)
     }
 
     pub fn render(&mut self, base: &'a EngineBase, output_folder: &str, output_filename: &str, output_size: (u32, u32), bitrate: Option<f64>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>) -> Result<(), FFmpegError> {
@@ -301,54 +341,59 @@ impl<'a> FfmpegProcessor<'a> {
                 stream_mapping[i] = -1;
                 continue;
             }
-            // Limit to first video stream
-            if medium == media::Type::Video && self.video.output_index.is_some() {
-                stream_mapping[i] = -1;
-                continue;
-            }
-            stream_mapping[i] = output_index as isize;
-            ist_time_bases[i] = stream.time_base();
-
             if medium == media::Type::Video {
-                self.video.input_index = i;
-                self.video.output_index = Some(output_index);
+                if i == self.video.input_index {
+                    // This is the selected video stream
+                    stream_mapping[i] = output_index as isize;
+                    ist_time_bases[i] = stream.time_base();
+                    self.video.output_index = Some(output_index);
 
-                let codec = encoder::find_by_name(self.video_codec.as_ref().ok_or(Error::EncoderNotFound)?).ok_or(Error::EncoderNotFound)?;
-                unsafe {
-                    if !codec.as_ptr().is_null() {
-                        self.video.codec_supported_formats = super::ffmpeg_hw::pix_formats_to_vec((*codec.as_ptr()).pix_fmts);
-                        log::debug!("Codec formats: {:?}", self.video.codec_supported_formats);
+                    let codec = encoder::find_by_name(self.video_codec.as_ref().ok_or(Error::EncoderNotFound)?).ok_or(Error::EncoderNotFound)?;
+                    unsafe {
+                        if !codec.as_ptr().is_null() {
+                            self.video.codec_supported_formats = super::ffmpeg_hw::pix_formats_to_vec((*codec.as_ptr()).pix_fmts);
+                            log::debug!("Codec formats: {:?}", self.video.codec_supported_formats);
+                        }
                     }
+                    let mut out_stream = octx.add_stream(codec)?;
+                    self.video.encoder_params.codec = Some(codec);
+
+                    self.video.encoder_params.frame_rate = Some(stream.avg_frame_rate());
+                    self.video.encoder_params.time_base = Some(stream.rate().invert());
+
+                    out_stream.set_rate(stream.rate());
+                    out_stream.set_time_base(stream.time_base());
+                    out_stream.set_avg_frame_rate(stream.avg_frame_rate());
+
+                    output_index += 1;
+                } else {
+                    // Skip other video streams
+                    stream_mapping[i] = -1;
+                    continue;
                 }
-                let mut out_stream = octx.add_stream(codec)?;
-                self.video.encoder_params.codec = Some(codec);
+            } else {
+                stream_mapping[i] = output_index as isize;
+                ist_time_bases[i] = stream.time_base();
 
-                self.video.encoder_params.frame_rate = Some(stream.avg_frame_rate());
-                self.video.encoder_params.time_base = Some(stream.rate().invert());
-
-                out_stream.set_rate(stream.rate());
-                out_stream.set_time_base(stream.time_base());
-                out_stream.set_avg_frame_rate(stream.avg_frame_rate());
-
-                output_index += 1;
-            } else if medium == media::Type::Audio && self.audio_codec != codec::Id::None {
-                if self.preserve_other_tracks/*stream.codec().id() == self.audio_codec*/ {
+                if medium == media::Type::Audio && self.audio_codec != codec::Id::None {
+                    if self.preserve_other_tracks/*stream.codec().id() == self.audio_codec*/ {
+                        // Direct stream copy
+                        let mut ost = octx.add_stream(encoder::find(codec::Id::None))?;
+                        ost.set_parameters(stream.parameters());
+                        // We need to set codec_tag to 0 lest we run into incompatible codec tag issues when muxing into a different container format.
+                        unsafe { (*ost.parameters().as_mut_ptr()).codec_tag = 0; }
+                    } else {
+                        // Transcode audio
+                        atranscoders.insert(i, AudioTranscoder::new(self.audio_codec, &stream, &mut octx, output_index as _)?);
+                    }
+                    output_index += 1;
+                } else if self.preserve_other_tracks && medium == media::Type::Data {
                     // Direct stream copy
                     let mut ost = octx.add_stream(encoder::find(codec::Id::None))?;
                     ost.set_parameters(stream.parameters());
-                    // We need to set codec_tag to 0 lest we run into incompatible codec tag issues when muxing into a different container format.
-                    unsafe { (*ost.parameters().as_mut_ptr()).codec_tag = 0; }
-                } else {
-                    // Transcode audio
-                    atranscoders.insert(i, AudioTranscoder::new(self.audio_codec, &stream, &mut octx, output_index as _)?);
+                    ost.set_avg_frame_rate(stream.avg_frame_rate());
+                    output_index += 1;
                 }
-                output_index += 1;
-            } else if self.preserve_other_tracks && medium == media::Type::Data {
-                // Direct stream copy
-                let mut ost = octx.add_stream(encoder::find(codec::Id::None))?;
-                ost.set_parameters(stream.parameters());
-                ost.set_avg_frame_rate(stream.avg_frame_rate());
-                output_index += 1;
             }
         }
         let mut updated_creation_time = None;
@@ -532,10 +577,8 @@ impl<'a> FfmpegProcessor<'a> {
 
         self.video.decode_only = true;
 
-        for (i, stream) in self.input_context.streams().enumerate() {
-            if stream.parameters().medium() == media::Type::Video {
-                self.video.input_index = i;
-
+        for stream in self.input_context.streams() {
+            if stream.index() == self.video.input_index {
                 // TODO this doesn't work for some reason
                 // let c_name = CString::new("resize").unwrap();
                 // let c_val = CString::new("1280x720").unwrap();
