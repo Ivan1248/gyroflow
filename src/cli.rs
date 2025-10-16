@@ -138,7 +138,7 @@ struct Opts {
     #[argh(option)]
     gps_settings: Option<String>,
 
-    /// create motion report file at specified path; contains avg_transl_dir and is_forward_stream (automatically enables motion estimation)
+    /// create motion report file at specified path; contains avg_transl_dir and is_moving_forward (automatically enables motion estimation)
     #[argh(option)]
     report_motion: Option<String>,
 
@@ -408,7 +408,7 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                         let offset_s = sync_result.map(|r| r.time_offset_s).unwrap_or(gps.offset_ms / 1000.0);
                                         let similarity = sync_result.map(|r| r.similarity).unwrap_or(0.0);
                                         let correlation = sync_result.map(|r| r.correlation).unwrap_or(0.0);
-                                        let course_range = if !track.is_empty() {
+                                        let course_range_deg = if !track.is_empty() {
                                             let course_raw = track.get_course_deg();
                                             let course_unwrapped = unwrap_angles_deg(&course_raw);
                                             if course_unwrapped.is_empty() {
@@ -424,7 +424,7 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                         if std::path::Path::new(&report_path).exists() && !opts.overwrite {
                                             log::error!("[{:08x}] GPS report file {} already exists. Use --overwrite to overwrite it.", job_id, report_path);
                                         } else {
-                                            match std::fs::write(&report_path, format!("offset: {}\nsimilarity: {}\ncorrelation: {}\ncourse_range: {}\n", offset_s, similarity, correlation, course_range)) {
+                                            match std::fs::write(&report_path, format!("offset: {}\nsimilarity: {}\ncorrelation: {}\ncourse_range_deg: {}\n", offset_s, similarity, correlation, course_range_deg)) {
                                                 Ok(_) => log::info!("[{:08x}] GPS report saved to: {}", job_id, report_path),
                                                 Err(e) => log::error!("[{:08x}] Failed to save GPS report: {}", job_id, e),
                                             }
@@ -452,11 +452,11 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                     for d in &dirs { s[0]+=d[0]; s[1]+=d[1]; s[2]+=d[2]; }
                                     let n = dirs.len() as f64; [s[0]/n, s[1]/n, s[2]/n]
                                 };
-                                let is_forward_stream = (avg[2] <= 0.0) as i32;
+                                let is_moving_forward = (avg[2] <= 0.0) as i32;
                                 if std::path::Path::new(motion_report_path).exists() && !opts.overwrite {
                                     log::error!("[{:08x}] Motion report file {} already exists. Use --overwrite to overwrite it.", job_id, motion_report_path);
                                 } else {
-                                    match std::fs::write(motion_report_path, format!("avg_transl_dir: ({:.6}, {:.6}, {:.6})\nis_forward_stream: {}\n", avg[0], avg[1], avg[2], is_forward_stream)) {
+                                    match std::fs::write(motion_report_path, format!("stream: {}\navg_transl_dir: ({:.6}, {:.6}, {:.6})\nis_moving_forward: {}\n", opts.stream.as_deref().unwrap_or("0"), avg[0], avg[1], avg[2], is_moving_forward)) {
                                         Ok(_) => log::info!("[{:08x}] Motion report saved to: {}", job_id, motion_report_path),
                                         Err(e) => log::error!("[{:08x}] Failed to save motion report: {}", job_id, e),
                                     }

@@ -1818,11 +1818,10 @@ impl StabilizationManager {
                 }
 
                 if let Some(horizon_amount) = obj.get("horizon_lock_amount").and_then(|x| x.as_f64()) {
-                    if let Some(horizon_roll) = obj.get("horizon_lock_roll").and_then(|x| x.as_f64()) {
-                        let horizon_pitch_enabled = obj.get("horizon_lock_pitch_enabled").and_then(|x| x.as_bool()).unwrap_or(false);
-                        let horizon_pitch = obj.get("horizon_lock_pitch").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                        smoothing.horizon_lock.set_horizon(horizon_amount, horizon_roll, horizon_pitch_enabled, horizon_pitch);
-                    }
+                    let horizon_roll = obj.get("horizon_lock_roll").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                    let horizon_pitch_enabled = obj.get("horizon_lock_pitch_enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let horizon_pitch = obj.get("horizon_lock_pitch").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                    smoothing.horizon_lock.set_horizon(horizon_amount, horizon_roll, horizon_pitch_enabled, horizon_pitch);
                 }
                 if let Some(v) = obj.get("use_gravity_vectors").and_then(|x| x.as_bool()) {
                     self.gyro.write().set_use_gravity_vectors(v);

@@ -178,13 +178,11 @@ impl<'a> FfmpegProcessor<'a> {
             if stream.parameters().medium() != media::Type::Video { return Err(Error::StreamNotFound.into()); }
             // Find decoder for this specific stream
             let codec_id = stream.parameters().id();
-            ::log::info!("Selected codec ID: {:?}", codec_id);
             let decoder = unsafe { ffi::avcodec_find_decoder(codec_id.into()) };
             if decoder.is_null() {
                 return Err(FFmpegError::DecoderNotFound);
             }
             let decoder = Self::maybe_android_decoder_override(decoder, codec_id.into(), gpu_decoding);
-            ::log::info!("Selected decoder: {:?}", decoder);
             Ok((stream, decoder))
         } else {
             // Best video stream according to libavformat
