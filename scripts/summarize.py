@@ -2,10 +2,13 @@
 """Summarize motion and GPS report files into CSV format."""
 
 import argparse
-import csv
+import warnings
 import sys
 from pathlib import Path
+
 import pandas as pd
+
+INDEX_NAME = 'id'
 
 
 def parse_report_content(content):
@@ -17,45 +20,38 @@ def parse_report_content(content):
     }
 
 
-def parse_report(file_path, output_dir, suffix, fields):
-    """Parse a single report file and return data row."""
+def parse_report(file_path):
+    """Parse a single report file and return data dict."""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
-
-        # Parse entire content into dictionary
-        report_dict = parse_report_content(content)
-
-        # Extract video name from file path relative to output directory
-        rel_path = file_path.relative_to(output_dir)
-        video_name = str(rel_path).replace(suffix, '').replace('\\', '/')
-
-        # Filter requested fields from the report dictionary
-        return [video_name] + [report_dict.get(field, "N/A") for field in fields]
-
+        return parse_report_content(content)
     except (IOError, OSError) as e:
         print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
         return None
 
 
-def parse_reports(output_dir, suffix, fields):
+def parse_reports(output_dir, suffix):
     """Parse report files and extract data."""
     # Find all report files with given suffix
     files = sorted(output_dir.glob(f"**/*{suffix}"))
-    if not files:
-        return pd.DataFrame()
 
-    rows = [
-        row for file_path in files if (row := parse_report(file_path, output_dir, suffix, fields))
-    ]
+    def get_name(file_path):
+        return str(file_path.relative_to(output_dir)).replace(suffix, '').replace('\\', '/')
 
-    if not rows:
-        return pd.DataFrame()
+    dicts = [{INDEX_NAME: get_name(file_path), **parse_report(file_path)} for file_path in files]
 
-    # Create DataFrame with video as index
-    df = pd.DataFrame(rows, columns=['video'] + fields)
-    df = df.set_index('video')
-    return df
+    # Validate fields and warn about mismatches between files
+    expected_fields = set(dicts[0].keys())
+    for dict in dicts:
+        actual_fields = set(dict.keys())
+        if actual_fields != expected_fields:
+            name = dict[INDEX_NAME]
+            warnings.warn(
+                f"Warning: {name} has unexpected fields: {', '.join(actual_fields)}, expected: {', '.join(expected_fields)}"
+            )
+
+    return pd.DataFrame(dicts).set_index(INDEX_NAME)
 
 
 def create_unified_summary(motion_df, gps_df, correctness_expr):
@@ -63,36 +59,27 @@ def create_unified_summary(motion_df, gps_df, correctness_expr):
     if motion_df.empty and gps_df.empty:
         return pd.DataFrame()
 
-    # Merge DataFrames on index (video names)
+    # Merge DataFrames on index
     unified_df = motion_df.join(gps_df, how='outer', rsuffix='_gps')
 
     def classify_row(row):
         try:
-            # Evaluate the expression with the row as input
             return eval(correctness_expr, globals(), row.to_dict())
         except (ValueError, TypeError, NameError, SyntaxError):
             return None
 
     unified_df['correctness'] = unified_df.apply(classify_row, axis=1)
 
-    # Reset index to make video a column
+    # Reset index to make video identifier a column
     unified_df = unified_df.reset_index()
 
     return unified_df
 
 
-def write_csv(filename, header, data):
-    """Write CSV data to file."""
+def write_csv(filename, data):
+    """Write DataFrame to CSV file."""
     try:
-        if isinstance(data, pd.DataFrame):
-            # If data is a DataFrame, use pandas to_csv
-            data.to_csv(filename, index=False, quoting=csv.QUOTE_ALL, encoding='utf-8')
-        else:
-            # If data is a list of lists, use csv writer
-            with open(filename, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-                writer.writerow(header)
-                writer.writerows(data)
+        data.to_csv(filename, index=False, quoting=1, encoding='utf-8')
         return True
     except (IOError, OSError) as e:
         print(f"Error: Could not write {filename}: {e}", file=sys.stderr)
@@ -112,7 +99,9 @@ def parse_arguments():
     parser.add_argument(
         "--correctness-expr",
         default="correlation > 0.45 and course_range_deg > 45 and abs(offset) < 4",
-        help="Expression for correctness classification (default: correlation > 0.45 and course_range_deg > 45 and abs(offset) < 4)")
+        help=
+        "Expression for correctness classification (default: correlation > 0.45 and course_range_deg > 45 and abs(offset) < 4)"
+    )
     return parser.parse_args()
 
 
@@ -128,30 +117,37 @@ def main():
     # Print summary header
     print(f"Summarizing reports from: {output_dir}")
 
-    # Process motion and GPS reports - Headers are Single Source of Truth
-    configs = [
-        dict(kind="motion",
-             header=["video", "stream", "avg_transl_dir", "is_moving_forward"],
-             suffix="_motion.txt"),
-        dict(kind="gps",
-             header=["video", "offset", "similarity", "correlation", "course_range_deg"],
-             suffix="_gps.txt")
-    ]
+    # Process motion and GPS reports - Dynamically discover fields
+    kinds = ["motion", "gps"]
 
-    kind_to_data = {
-        config["kind"]: parse_reports(output_dir, config["suffix"], config["header"][1:])
-        for config in configs
-    }
-    kind_to_data["unified"] = create_unified_summary(kind_to_data["motion"], kind_to_data["gps"], args.correctness_expr)
+    kind_to_data = {}
+    for kind in kinds:
+        df = parse_reports(output_dir, suffix=f"_{kind}.txt")
+        kind_to_data[kind] = df
+        # Get fields from dataframe columns (excluding index)
+        fields = [col for col in df.columns if col != df.index.name]
+        print(f"Found {len(fields)} fields in {kind} reports: {', '.join(fields)}")
+    kind_to_data["unified"] = create_unified_summary(kind_to_data["motion"], kind_to_data["gps"],
+                                                     args.correctness_expr)
 
+    created_files = []
+    total_videos = 0
     for kind, data in kind_to_data.items():
         if not data.empty:
-            write_csv(output_dir / f"{kind}_summary.csv", None, data)
+            filename = f"{kind}_summary.csv"
+            write_csv(output_dir / filename, data)
+            created_files.append(filename)
+            total_videos = max(total_videos, len(data))  # Use the largest count as total videos
         else:
             print(f"No {kind} report files found")
 
-    # Print summary footer
-    print(f"\nCSV summary files created in: {output_dir}")
+    # Print summary footer with more details
+    if created_files:
+        print(f"\nSummary: Processed {total_videos} videos, created {len(created_files)} CSV files in {output_dir}:")
+        for filename in created_files:
+            print(f"  - {output_dir / filename}")
+    else:
+        print(f"\nNo CSV summary files created in: {output_dir}")
 
 
 if __name__ == "__main__":
