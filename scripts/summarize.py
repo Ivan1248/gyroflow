@@ -143,7 +143,9 @@ def main():
 
     # Print summary footer with more details
     if created_files:
-        print(f"\nSummary: Processed {total_videos} videos, created {len(created_files)} CSV files in {output_dir}:")
+        print(
+            f"\nSummary: Processed {total_videos} videos, created {len(created_files)} CSV files in {output_dir}:"
+        )
         for filename in created_files:
             print(f"  - {output_dir / filename}")
     else:

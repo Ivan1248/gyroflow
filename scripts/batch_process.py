@@ -23,17 +23,22 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 # Default configuration
 DEFAULT_PRESET = {
     "version": 2,
     "stabilization": {
         "fov": 3.222,
         "method": "Plain 3D",
-        "smoothing_params": [{"name": "time_constant", "value": 1.0}],
+        "smoothing_params": [{
+            "name": "time_constant",
+            "value": 1.0
+        }],
         "horizon_lock_amount": 100.0,  # in percent
         "motion_direction_enabled": True,
-        "motion_direction_params": [{"name": "flip_backward_dir", "value": False}]
+        "motion_direction_params": [{
+            "name": "flip_backward_dir",
+            "value": False
+        }]
     },
     "output": {
         "width": 1280,
@@ -50,7 +55,11 @@ GPS_SETTINGS = {
 }
 
 
-def process_directory(rec_dir: Path, output_root_abs: Path, gyroflow_cmd: str, preset: dict, keep_backward: bool = False) -> None:
+def process_directory(rec_dir: Path,
+                      output_root_abs: Path,
+                      gyroflow_cmd: str,
+                      preset: dict,
+                      keep_backward: bool = False) -> None:
     """Process a single recording directory."""
     rec_name = rec_dir.name
     out_dir = output_root_abs / rec_name
@@ -79,16 +88,15 @@ def process_directory(rec_dir: Path, output_root_abs: Path, gyroflow_cmd: str, p
     # Process each stream (0 and 1)
     for stream in [0, 1]:
         cmd = [
-            gyroflow_cmd, str(vid_file),
-            "--stream", str(stream),
-            "--preset", json.dumps(preset),
-            "--overwrite",
-            "-p", json.dumps({"output_path": f"{out_stem}_s{stream}.mp4"}),
-            "--input-gpx", str(gpx_file),
-            "--gps-settings", json.dumps(GPS_SETTINGS),
-            "--export-gpx", f"{out_stem}_s{stream}.gpx",
-            "--report-motion", f"{out_stem}_motion_s{stream}.txt",
-            "--report-gps", f"{out_stem}_gps_s{stream}.txt"
+            gyroflow_cmd,
+            str(vid_file), "--stream",
+            str(stream), "--preset",
+            json.dumps(preset), "--overwrite", "-p",
+            json.dumps({"output_path": f"{out_stem}_s{stream}.mp4"}), "--input-gpx",
+            str(gpx_file), "--gps-settings",
+            json.dumps(GPS_SETTINGS), "--export-gpx", f"{out_stem}_s{stream}.gpx",
+            "--report-motion", f"{out_stem}_motion_s{stream}.txt", "--report-gps",
+            f"{out_stem}_gps_s{stream}.txt"
         ]
 
         print(f"Running: {' '.join(cmd)}")
@@ -130,42 +138,33 @@ def process_directory(rec_dir: Path, output_root_abs: Path, gyroflow_cmd: str, p
             print(f"Warning: Could not rename some files: {e}")
 
 
-def parse_arguments():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Batch process INSV files with Gyroflow stabilization",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+EXAMPLE_USAGE = """
 Examples:
   %(prog)s ./input ./output                              # Process all directories
   %(prog)s ./input ./output --dir-pattern 'session*'     # Process directories starting with 'session'
   %(prog)s ./input ./output --gyroflow-cmd ./gyroflow    # Use custom gyroflow path
   %(prog)s ./input ./output --keep-backward              # Keep backward-looking streams
-  %(prog)s ./input ./output --dir-pattern '.*2024.*' --gyroflow-cmd 'docker run gyroflow:latest'
-        """
+"""
+
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Batch process INSV files with Gyroflow stabilization",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=EXAMPLE_USAGE,
     )
-    parser.add_argument(
-        "input_root",
-        help="Directory containing subdirectories with INSV and GPX files"
-    )
-    parser.add_argument(
-        "output_root",
-        help="Directory where processed results will be saved"
-    )
-    parser.add_argument(
-        "--dir-pattern",
-        help="Regex pattern for input subdirectories (default: all directories)"
-    )
-    parser.add_argument(
-        "--gyroflow-cmd",
-        default="gyroflow",
-        help="Gyroflow command/path (default: 'gyroflow')"
-    )
-    parser.add_argument(
-        "--keep-backward",
-        action="store_true",
-        help="Keep backward-looking video streams instead of deleting them"
-    )
+    parser.add_argument("input_root",
+                        help="Directory containing subdirectories with INSV and GPX files")
+    parser.add_argument("output_root", help="Directory where processed results will be saved")
+    parser.add_argument("--dir-pattern",
+                        help="Regex pattern for input subdirectories (default: all directories)")
+    parser.add_argument("--gyroflow-cmd",
+                        default="gyroflow",
+                        help="Gyroflow command/path (default: 'gyroflow')")
+    parser.add_argument("--keep-backward",
+                        action="store_true",
+                        help="Keep backward-looking video streams instead of deleting them")
     return parser.parse_args()
 
 
@@ -179,16 +178,18 @@ def main():
     if not input_root.is_dir():
         print(f"Error: Input directory '{input_root}' does not exist or is not a directory")
         sys.exit(1)
-    
+
     # Compile regex pattern if provided
     dir_pattern = re.compile(args.dir_pattern) if args.dir_pattern else None
     # Gyroflow CLI requires absolute paths
     output_root_abs = output_root.resolve()
     # Process all subdirectories
     for rec_dir in sorted(input_root.iterdir()):
-        if not rec_dir.is_dir() or (dir_pattern is not None and not dir_pattern.search(rec_dir.name)):
+        if not rec_dir.is_dir() or (dir_pattern is not None and
+                                    not dir_pattern.search(rec_dir.name)):
             continue
-        process_directory(rec_dir, output_root_abs, args.gyroflow_cmd, DEFAULT_PRESET, args.keep_backward)
+        process_directory(rec_dir, output_root_abs, args.gyroflow_cmd, DEFAULT_PRESET,
+                          args.keep_backward)
 
     print("Batch processing completed!")
 
