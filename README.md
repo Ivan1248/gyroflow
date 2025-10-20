@@ -255,7 +255,7 @@ python scripts/batch_process.py input_directory output_directory [options]
 - `output_directory`: Directory where processed results will be saved
 
 **Options:**
-- `--dir-pattern <pattern>`: Regex pattern for input subdirectories (default: all directories)
+- `--dir-regex <pattern>`: Regex pattern for input subdirectories (default: all directories)
 - `--gyroflow-cmd <command>`: Gyroflow command/path (default: 'gyroflow')
 
 **Features:**
@@ -270,7 +270,7 @@ python scripts/batch_process.py input_directory output_directory [options]
 python scripts/batch_process.py ./input ./output
 
 # Process only directories starting with 'session' and use custom gyroflow command
-python scripts/batch_process.py ./input ./output --dir-pattern 'session.*' --gyroflow-cmd './gyroflow-cli'
+python scripts/batch_process.py ./input ./output --dir-regex 'session.*' --gyroflow-cmd './gyroflow-cli'
 ```
 
 ### summarize.py
@@ -290,7 +290,7 @@ python scripts/summarize.py output_directory [options]
 - `--correctness-expr <expression>`: Expression for correctness classification (default: `correlation > 0.45 and course_range_deg > 45 and offset < 4`)
 
 **Output files:**
-- `motion_summary.csv`: Motion analysis data (stream, avg_transl_dir, is_moving_forward)
+- `motion_summary.csv`: Motion analysis data (stream, avg_transl_dir, is_looking_forward)
 - `gps_summary.csv`: GPS synchronization data (offset, similarity, correlation, course_range_deg)
 - `unified_summary.csv`: Combined motion and GPS data with correctness classification (when using `--unified`)
 

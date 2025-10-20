@@ -51,7 +51,7 @@ GPS_SETTINGS = {
     "sync_mode": "auto",
     "use_processed_motion": True,
     "speed_threshold": 1.5,
-    "max_time_offset_s": 5.0
+    "max_time_offset_s": 6.0
 }
 
 
@@ -108,7 +108,7 @@ def process_directory(rec_dir: Path,
         # Check if this stream has forward motion
         motion_report = out_stem.parent / f"{vid_name}_motion_s{stream}.txt"
         if motion_report.exists():
-            if "is_moving_forward: 1" in motion_report.read_text():
+            if "is_looking_forward: 1" in motion_report.read_text():
                 print(f"Video stream {stream} has forward motion")
                 fwd_stream = stream if fwd_stream is None else fwd_stream
             else:
@@ -141,7 +141,7 @@ def process_directory(rec_dir: Path,
 EXAMPLE_USAGE = """
 Examples:
   %(prog)s ./input ./output                              # Process all directories
-  %(prog)s ./input ./output --dir-pattern 'session*'     # Process directories starting with 'session'
+  %(prog)s ./input ./output --dir-regex 'session*'     # Process directories starting with 'session'
   %(prog)s ./input ./output --gyroflow-cmd ./gyroflow    # Use custom gyroflow path
   %(prog)s ./input ./output --keep-backward              # Keep backward-looking streams
 """
@@ -157,7 +157,7 @@ def parse_arguments():
     parser.add_argument("input_root",
                         help="Directory containing subdirectories with INSV and GPX files")
     parser.add_argument("output_root", help="Directory where processed results will be saved")
-    parser.add_argument("--dir-pattern",
+    parser.add_argument("--dir-regex",
                         help="Regex pattern for input subdirectories (default: all directories)")
     parser.add_argument("--gyroflow-cmd",
                         default="gyroflow",
@@ -180,13 +180,13 @@ def main():
         sys.exit(1)
 
     # Compile regex pattern if provided
-    dir_pattern = re.compile(args.dir_pattern) if args.dir_pattern else None
+    dir_regex = re.compile(args.dir_regex) if args.dir_regex else None
     # Gyroflow CLI requires absolute paths
     output_root_abs = output_root.resolve()
     # Process all subdirectories
     for rec_dir in sorted(input_root.iterdir()):
-        if not rec_dir.is_dir() or (dir_pattern is not None and
-                                    not dir_pattern.search(rec_dir.name)):
+        if not rec_dir.is_dir() or (dir_regex is not None and
+                                    not dir_regex.search(rec_dir.name)):
             continue
         process_directory(rec_dir, output_root_abs, args.gyroflow_cmd, DEFAULT_PRESET,
                           args.keep_backward)
