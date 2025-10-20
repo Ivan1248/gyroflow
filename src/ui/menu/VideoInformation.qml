@@ -212,6 +212,46 @@ MenuItem {
         });
     }
 
+    Label {
+        position: Label.LeftPosition;
+        text: qsTr("Stream selection")
+        ComboBox {
+            id: dualStreamMode;
+            model: [
+                qsTr("Front camera (default)"),
+                qsTr("Back camera"),
+                qsTr("Dual-stream stitched")
+            ];
+            currentIndex: {
+                const mode = settings.value("dualStreamMode", "default");
+                return mode === "back" ? 1 : mode === "stitched" ? 2 : 0;
+            }
+            width: parent.width;
+            onCurrentIndexChanged: {
+                const modes = ["default", "back", "stitched"];
+                settings.setValue("dualStreamMode", modes[currentIndex]);
+
+                // If motion direction alignment is enabled, re-run motion estimation
+                // so translation direction aligns with the selected camera stream.
+                try {
+                    const status = controller.get_motion_direction_status();
+                    if (status && status.length > 0 && !controller.sync_in_progress) {
+                        window.motionData.runMotionEstimation();
+                    }
+                } catch(e) { }
+            }
+        }
+    }
+    Text {
+        visible: dualStreamMode.currentIndex === 1; // Back camera selected
+        text: qsTr("Note: Preview shows front camera, processing uses back camera");
+        font.pixelSize: 11 * dpiScale;
+        color: "#888";
+        anchors.left: parent.left;
+        anchors.right: parent.right;
+        anchors.leftMargin: 10 * dpiScale;
+    }
+
     DropTarget {
         parent: root.innerItem;
         color: styleBackground2;

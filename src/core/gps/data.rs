@@ -12,14 +12,14 @@ pub struct TrackPoint {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct GPSTrack {
+pub struct GpsTrack {
     pub time: Vec<f64>,  // seconds since Unix epoch (UTC)
     pub lat: Vec<f64>,
     pub lon: Vec<f64>,
     pub altitude: Vec<f64>,
 }
 
-impl GPSTrack {
+impl GpsTrack {
     pub fn len(&self) -> usize { self.time.len() }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 

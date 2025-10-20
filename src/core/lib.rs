@@ -157,7 +157,7 @@ impl Default for StabilizationManager {
 
 impl StabilizationManager {
     // ---------------- GPS façade ----------------
-    pub fn set_gpx_track(&self, track: crate::gps::GPSTrack) {
+    pub fn set_gpx_track(&self, track: crate::gps::GpsTrack) {
         let mut gps = self.gps.write();
         gps.set_track(track);
     }
@@ -173,12 +173,12 @@ impl StabilizationManager {
     pub fn set_gps_sync_mode(&self, mode: i32) {
         use crate::gps::source::GPSSyncMode as M;
         self.gps.write().set_sync_mode(match mode { 1 => M::Auto, 2 => M::Manual, _ => M::Off });
-        self.gps.write().compute_correlation_with_offset(&self.gyro.read());
+        self.gps.write().update_metrics(&self.gyro.read());
     }
     pub fn get_gps_offset_ms(&self) -> f64 { self.gps.read().offset_ms }
     pub fn set_gps_offset_ms(&self, offset_ms: f64) { 
         self.gps.write().offset_ms = offset_ms; 
-        self.gps.write().compute_correlation_with_offset(&self.gyro.read()); 
+        self.gps.write().update_metrics(&self.gyro.read()); 
     }
     pub fn get_gps_anchor(&self) -> String {
         use crate::gps::source::TimeAlignment;
@@ -212,7 +212,7 @@ impl StabilizationManager {
     pub fn get_gps_sync_result(&self) -> Option<GpsSyncResult> {
         self.gps.read().get_sync_result()
     }
-    pub fn get_gps_track(&self) -> Option<crate::gps::GPSTrack> { self.gps.read().track.clone() }
+    pub fn get_gps_track(&self) -> Option<crate::gps::GpsTrack> { self.gps.read().track.clone() }
     
     pub fn init_from_video_data(&self, duration_ms: f64, fps: f64, frame_count: usize, video_size: (usize, usize)) {
         {

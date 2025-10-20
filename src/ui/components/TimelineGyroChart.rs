@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use gyroflow_core::gps::{ unwrap_angles_deg, resample_linear, GPSTrack };
+use gyroflow_core::gps::{ unwrap_angles_deg, resample_linear, GpsTrack };
 use gyroflow_core::gps::sync::preprocess_angular_signal;
 use gyroflow_core::stabilization_params::StabilizationParams;
 use gyroflow_core::keyframes::{ KeyframeManager, KeyframeType };
@@ -130,7 +130,7 @@ impl TimelineGyroChart {
     }
 
     fn prepare_gps_data(
-        track: &GPSTrack,
+        track: &GpsTrack,
         gyro: &GyroSource,
         offset_ms: f64,
         use_processed_motion: bool,
@@ -501,7 +501,7 @@ impl TimelineGyroChart {
         gyro: &GyroSource,
         params: &StabilizationParams,
         keyframes: &KeyframeManager,
-        gps_track: Option<GPSTrack>,
+        gps_track: Option<GpsTrack>,
         gps_offset_ms: f64,
         gps_use_processed_motion: bool,
         gps_speed_threshold: f64,

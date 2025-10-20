@@ -32,7 +32,7 @@ macro_rules! assert_equal_lengths {
 }
 
 pub const DEFAULT_SPEED_THRESHOLD: f64 = 1.5;
-pub const DEFAULT_MAX_TIME_OFFSET_S: f64 = 10.0;
+pub const DEFAULT_MAX_TIME_OFFSET_S: f64 = 6.0;
 pub const DEFAULT_SAMPLE_RATE: f64 = 10.0;
 const MIN_NUM_SYNC_SAMPLES: usize = 8;
 
@@ -63,6 +63,7 @@ pub struct GpsSyncResult {
     pub valid_count: usize,   // number of samples used after masking
     pub similarity: f64,  // RMS angular error in degrees
     pub correlation: f64,       // correlation coefficient from cross-correlation
+    pub course_range_deg: f64,  // Range of course angles over valid points (degrees)
 }
 
 pub fn sample_gyro_yaw_at_times(
@@ -172,14 +173,18 @@ pub fn synchronize_gps_gyro(
         signal_pearson_correlation
     );
 
+    let course_range_deg = compute_course_range(gps_course_deg, mask.as_deref());
+
     Some(GpsSyncResult {
         time_offset_s: offset,
         valid_count: valid_count,
         similarity: neg_l1_distance,
         correlation: correlation,
+        course_range_deg: course_range_deg,
     })
 }
 
+/// Wrap angle to -180 to 180 degrees
 #[inline]
 fn wrap_angle_deg(d: f64) -> f64 {
     (d + 180.0).rem_euclid(360.0) - 180.0
@@ -215,6 +220,28 @@ fn signal_correlation(
     }
 
     correlation_sum / valid_samples as f64
+}
+
+/// Compute the range of course angles over valid points with optional masking.
+fn compute_course_range(gps_course_deg: &[f64], mask: Option<&[bool]>) -> f64 {
+    let n = gps_course_deg.len();
+    if let Some(mask) = mask {
+        assert_eq!(mask.len(), n, "Mask length {} doesn't match course length {}", mask.len(), n);
+        let mut min_course = f64::INFINITY;
+        let mut max_course = f64::NEG_INFINITY;
+        for i in 0..n {
+            if mask[i] {
+                let course = gps_course_deg[i];
+                min_course = min_course.min(course);
+                max_course = max_course.max(course);
+            }
+        }
+        if min_course == f64::INFINITY { 0.0 } else { max_course - min_course }
+    } else {
+        let min_course = gps_course_deg.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_course = gps_course_deg.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        max_course - min_course
+    }
 }
 
 /// Compute Pearson correlation coefficient between two aligned signals with optional masking.
@@ -330,15 +357,11 @@ where
         if abs_offset >= n { continue; }
         let len = n - abs_offset;
 
-        let (a_slice, b_slice) = if offset >= 0 {
-            (&sig_a[..len], &sig_b[abs_offset..])
+        let correlation = if offset >= 0 {
+            similarity_fn(&sig_a[..len], &sig_b[abs_offset..], mask_a.map(|m| &m[..len]))
         } else {
-            (&sig_a[abs_offset..], &sig_b[..len])
+            similarity_fn(&sig_a[abs_offset..], &sig_b[..len], mask_a.map(|m| &m[abs_offset..]))
         };
-
-        let mask_slice = mask_a.map(|m| &m[..len]);
-
-        let correlation = similarity_fn(a_slice, b_slice, mask_slice);
         // println!("offset: {:.3}, correlation: {:.3}", offset as f64 / sample_rate, correlation);
         if correlation > best_correlation {
             best_correlation = correlation;

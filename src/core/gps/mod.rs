@@ -8,7 +8,7 @@ pub mod source;
 pub mod sync;
 
 // Re-export commonly used types
-pub use data::{TrackPoint, GPSTrack};
+pub use data::{TrackPoint, GpsTrack};
 pub use io::{parse_gpx_from_str, parse_gpx_file, save_gpx_file};
 pub use processing::{
     haversine_distance_m, 

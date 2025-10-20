@@ -3,9 +3,9 @@
 
 use std::path::Path;
 use std::fs;
-use super::data::{TrackPoint, GPSTrack};
+use super::data::{TrackPoint, GpsTrack};
 
-pub fn parse_gpx_from_str(s: &str) -> Result<GPSTrack, crate::GyroflowCoreError> {
+pub fn parse_gpx_from_str(s: &str) -> Result<GpsTrack, crate::GyroflowCoreError> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
     use chrono::{DateTime, FixedOffset};
@@ -65,15 +65,15 @@ pub fn parse_gpx_from_str(s: &str) -> Result<GPSTrack, crate::GyroflowCoreError>
         buf.clear();
     }
 
-    Ok(GPSTrack::from_track_points(points))
+    Ok(GpsTrack::from_track_points(points))
 }
 
-pub fn parse_gpx_file<P: AsRef<Path>>(path: P) -> Result<GPSTrack, crate::GyroflowCoreError> {
+pub fn parse_gpx_file<P: AsRef<Path>>(path: P) -> Result<GpsTrack, crate::GyroflowCoreError> {
     let s = fs::read_to_string(path)?;
     parse_gpx_from_str(&s)
 }
 
-pub fn save_gpx_file<P: AsRef<Path>>(path: P, time_offset: f64, track: &GPSTrack) -> Result<(), crate::GyroflowCoreError> {
+pub fn save_gpx_file<P: AsRef<Path>>(path: P, time_offset: f64, track: &GpsTrack) -> Result<(), crate::GyroflowCoreError> {
     use chrono::{TimeZone, Utc};
     use quick_xml::Writer;
     use quick_xml::events::{Event, BytesDecl, BytesStart};

@@ -138,7 +138,7 @@ struct Opts {
     #[argh(option)]
     gps_settings: Option<String>,
 
-    /// create motion report file at specified path; contains avg_transl_dir and is_moving_forward (automatically enables motion estimation)
+    /// create motion report file at specified path; contains avg_transl_dir and is_looking_forward (automatically enables motion estimation)
     #[argh(option)]
     report_motion: Option<String>,
 
@@ -405,22 +405,11 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                     // Create GPS synchronization report if requested
                                     if let Some(ref report_path) = opts.report_gps {
                                         let sync_result = gps.sync_result.as_ref();
-                                        let offset_s = sync_result.map(|r| r.time_offset_s).unwrap_or(gps.offset_ms / 1000.0);
+                                        // Report effective offset matching GUI (gps.offset_ms), not raw result.time_offset_s
+                                        let offset_s = gps.offset_ms / 1000.0;
                                         let similarity = sync_result.map(|r| r.similarity).unwrap_or(0.0);
                                         let correlation = sync_result.map(|r| r.correlation).unwrap_or(0.0);
-                                        let course_range_deg = if !track.is_empty() {
-                                            let course_raw = track.get_course_deg();
-                                            let course_unwrapped = unwrap_angles_deg(&course_raw);
-                                            if course_unwrapped.is_empty() {
-                                                0.0
-                                            } else {
-                                                let min_course = course_unwrapped.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                                                let max_course = course_unwrapped.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                                                max_course - min_course
-                                            }
-                                        } else {
-                                            0.0
-                                        };
+                                        let course_range_deg = sync_result.map(|r| r.course_range_deg).unwrap_or(0.0);
                                         if std::path::Path::new(&report_path).exists() && !opts.overwrite {
                                             log::error!("[{:08x}] GPS report file {} already exists. Use --overwrite to overwrite it.", job_id, report_path);
                                         } else {
@@ -452,11 +441,11 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                     for d in &dirs { s[0]+=d[0]; s[1]+=d[1]; s[2]+=d[2]; }
                                     let n = dirs.len() as f64; [s[0]/n, s[1]/n, s[2]/n]
                                 };
-                                let is_moving_forward = (avg[2] <= 0.0) as i32;
+                                let is_looking_forward = (avg[2] <= 0.0) as i32;
                                 if std::path::Path::new(motion_report_path).exists() && !opts.overwrite {
                                     log::error!("[{:08x}] Motion report file {} already exists. Use --overwrite to overwrite it.", job_id, motion_report_path);
                                 } else {
-                                    match std::fs::write(motion_report_path, format!("stream: {}\navg_transl_dir: ({:.6}, {:.6}, {:.6})\nis_moving_forward: {}\n", opts.stream.as_deref().unwrap_or("0"), avg[0], avg[1], avg[2], is_moving_forward)) {
+                                    match std::fs::write(motion_report_path, format!("stream: {}\navg_transl_dir: ({:.6}, {:.6}, {:.6})\nis_looking_forward: {}\n", opts.stream.as_deref().unwrap_or("0"), avg[0], avg[1], avg[2], is_looking_forward)) {
                                         Ok(_) => log::info!("[{:08x}] Motion report saved to: {}", job_id, motion_report_path),
                                         Err(e) => log::error!("[{:08x}] Failed to save motion report: {}", job_id, e),
                                     }

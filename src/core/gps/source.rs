@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2022 Ivan Grubišić <ivan.grubisic at gmail>
 
-use super::data::GPSTrack;
+use super::data::GpsTrack;
 use super::sync::GpsSyncResult;
 use super::processing::{resample_linear, unwrap_angles_deg};
 use super::sync::{synchronize_gps_gyro, sample_gyro_yaw_at_times, GpsSyncSettings, preprocess_angular_signal, signal_pearson_correlation};
@@ -32,7 +32,7 @@ pub struct TimeAlignment {
 impl TimeAlignment {
     /// Compute time alignment between GPS track and video.
     /// TODO: review and improve
-    pub fn compute(track: &GPSTrack, video_duration_ms: f64, apply_offset: bool, offset_ms: f64) -> Self {
+    pub fn compute(track: &GpsTrack, video_duration_ms: f64, apply_offset: bool, offset_ms: f64) -> Self {
         if track.time.is_empty() {
             return Self {
                 anchor: GPSAnchor::Absolute,
@@ -94,7 +94,7 @@ pub struct PreparedGpsData {
 impl PreparedGpsData {
     /// Prepare GPS data for synchronization: unwrap angles, then resample uniformly.
     pub fn prepare(
-        track: &GPSTrack,
+        track: &GpsTrack,
         anchor_time_s: f64,
         video_duration_ms: f64,
         sample_rate_hz: f64,
@@ -138,7 +138,7 @@ impl PreparedGpsData {
 #[derive(Debug, Clone)]
 pub struct GpsSource {
     // computed state
-    pub track: Option<GPSTrack>,  // .time in seconds since video creation time
+    pub track: Option<GpsTrack>,  // .time in seconds since video creation time
     pub offset_ms: f64,  // setting in case of manual offset
     pub sync_result: Option<GpsSyncResult>,  // Full synchronization result
     // settings
@@ -167,7 +167,7 @@ impl GpsSource {
         self.sync_result = None;
     }
     
-    pub fn set_track(&mut self, track: GPSTrack) {
+    pub fn set_track(&mut self, track: GpsTrack) {
         self.track = Some(track);
         self.offset_ms = 0.0;
         self.sync_result = None;
@@ -261,11 +261,17 @@ impl GpsSource {
         signal_pearson_correlation(&course_processed, &yaw_processed, Some(&speed_mask))
     }
 
-    /// Compute correlation with the current offset setting
-    pub fn compute_correlation_with_offset(&mut self, gyro: &GyroSource) {
-        let mut settings = self.sync_settings;
-        settings.time_offset_range_s = (self.offset_ms / 1000.0, self.offset_ms / 1000.0);
+    /// Update quality metrics (correlation, similarity, etc.) at the current offset
+    pub fn update_metrics(&mut self, gyro: &GyroSource) {
+        // Preserve the effective offset; we only want to recompute metrics, not change offset
+        let original_offset_ms = self.offset_ms;
+        let settings = GpsSyncSettings {
+            time_offset_range_s: (self.offset_ms / 1000.0, self.offset_ms / 1000.0),
+            ..self.sync_settings
+        };
         self.synchronize_with_gyro_internal(gyro, &settings);
+        // Restore original offset to avoid unintended drift caused by anchor reapplication
+        self.offset_ms = original_offset_ms;
     }
 
     pub fn summary_json(&self, video_duration_ms: f64) -> serde_json::Value {
