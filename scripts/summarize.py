@@ -31,9 +31,10 @@ def parse_report(file_path):
         return None
 
 
-def parse_reports(output_dir, suffix):
+def parse_reports(output_dir, kind):
     """Parse report files and extract data."""
     # Find all report files with given suffix
+    suffix = f"_{kind}.txt"
     files = sorted(output_dir.glob(f"**/*{suffix}"))
 
     def get_name(file_path):
@@ -122,7 +123,7 @@ def main():
 
     kind_to_data = {}
     for kind in kinds:
-        df = parse_reports(output_dir, suffix=f"_{kind}.txt")
+        df = parse_reports(output_dir, kind)
         kind_to_data[kind] = df
         # Get fields from dataframe columns (excluding index)
         fields = [col for col in df.columns if col != df.index.name]
