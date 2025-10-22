@@ -69,8 +69,8 @@ impl OpticalFlowTrait for OFOpenCVDis {
                 // offsets for centering the grid
                 let w_offset = step / 2 + ((w - step) % step) / 2;
                 let h_offset = step / 2 + ((h - step) % step) / 2;
-                for i in (h_offset..a1_img.cols()).step_by(step as usize) {
-                    for j in (w_offset..a1_img.rows()).step_by(step as usize) {
+                for i in (w_offset..a1_img.cols()).step_by(step as usize) {
+                    for j in (h_offset..a1_img.rows()).step_by(step as usize) {
                         let pt = of.at_2d::<Vec2f>(j, i)?;
                         points_a.push((i as f32, j as f32));
                         points_b.push((i as f32 + pt[0] as f32, j as f32 + pt[1] as f32));
