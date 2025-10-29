@@ -21,6 +21,7 @@ use parking_lot::RwLock;
 use rayon::iter::{ ParallelIterator, IntoParallelIterator };
 
 use crate::stabilization::distortion_models::DistortionModel;
+use crate::util::cv_to_mat3;
 
 pub mod drawing;
 
@@ -281,7 +282,7 @@ impl LensCalibrator {
             // match opencv::calib3d::calibrate_camera_ro(&objpoints, &imgpoints, size, 13, &mut k, &mut d, &mut rv, &mut tv, &mut nop, Fisheye_CALIB_RECOMPUTE_EXTRINSIC | Fisheye_CALIB_FIX_SKEW, calib_criteria) {
             match opencv::calib3d::calibrate(&objpoints, &imgpoints, size, &mut k, &mut d, &mut rv, &mut tv, Fisheye_CALIB_RECOMPUTE_EXTRINSIC | Fisheye_CALIB_FIX_SKEW, calib_criteria) {
                 Ok(rms) => {
-                    if let Ok(k) = cv_to_mat3(k) {
+                    if let Ok(k) = cv_to_mat3(&k) {
                         if let Ok(d) = cv_to_vec4(d) {
                             return (rms, k, d, final_frames);
                         }
@@ -305,18 +306,6 @@ impl LensCalibrator {
             Err(opencv::Error::new(0, "Unable to calibrate camera".to_string()))
         }
     }
-}
-
-#[cfg(feature = "use-opencv")]
-fn cv_to_mat3(r1: Mat) -> Result<Matrix3<f64>, opencv::Error> {
-    if r1.typ() != opencv::core::CV_64FC1 {
-        return Err(opencv::Error::new(0, "Invalid matrix type".to_string()));
-    }
-    Ok(Matrix3::new(
-        *r1.at_2d::<f64>(0, 0)?, *r1.at_2d::<f64>(0, 1)?, *r1.at_2d::<f64>(0, 2)?,
-        *r1.at_2d::<f64>(1, 0)?, *r1.at_2d::<f64>(1, 1)?, *r1.at_2d::<f64>(1, 2)?,
-        *r1.at_2d::<f64>(2, 0)?, *r1.at_2d::<f64>(2, 1)?, *r1.at_2d::<f64>(2, 2)?
-    ))
 }
 
 #[cfg(feature = "use-opencv")]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2022 Adrian <adrian.eddy at gmail>
 
-use std::io::Result;
+use std::result::Result;
 
 #[no_mangle]
 pub static NvOptimusEnablement: i32 = 1;
@@ -57,7 +57,7 @@ where T: serde::Serialize {
     String::from_utf8(base91::slice_encode(&compressed)).ok()
 }
 
-pub fn decompress_from_base91_cbor<'de, T>(base91: &str) -> Result<T>
+pub fn decompress_from_base91_cbor<'de, T>(base91: &str) -> std::io::Result<T>
 where T: serde::de::DeserializeOwned {
     use std::io::Read;
     if base91.is_empty() { return Err(std::io::ErrorKind::NotFound.into()); }
@@ -147,6 +147,39 @@ pub fn init_telemetry_parser() {
 pub fn map_coord<T>(x: T, in_min: T, in_max: T, out_min: T, out_max: T) -> T
 where T: std::ops::Sub<Output = T> + std::ops::Mul<Output = T> + std::ops::Div<Output = T> + std::ops::Add<Output = T> + Copy {
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+/// Calculate the median of a vector of f64 values.
+/// The vector is sorted in place and the median is returned.
+/// For even number of elements, returns the average of the two middle values.
+pub fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let len = v.len();
+    if len == 0 {
+        0.0
+    } else if (len % 2) == 0 {
+        (v[len / 2 - 1] + v[len / 2]) / 2.0
+    } else {
+        v[len / 2]
+    }
+}
+
+/// Convert an OpenCV Mat to a nalgebra Matrix3<f64>
+#[cfg(feature = "use-opencv")]
+pub fn cv_to_mat3(mat: &opencv::core::Mat) -> Result<nalgebra::Matrix3<f64>, opencv::Error> {
+    use opencv::core::MatTraitConst;
+    use opencv::prelude::MatTraitConstManual;
+
+    if mat.typ() != opencv::core::CV_64FC1 {
+        return Err(opencv::Error::new(0, "Invalid matrix type"));
+    }
+    if mat.rows() != 3 || mat.cols() != 3 {
+        return Err(opencv::Error::new(0, "Matrix must be 3x3"));
+    }
+
+    // More efficient: get data as slice and use nalgebra's from_row_slice
+    let data = mat.data_typed::<f64>()?;
+    Ok(nalgebra::Matrix3::from_row_slice(&data[..9]))
 }
 
 /*

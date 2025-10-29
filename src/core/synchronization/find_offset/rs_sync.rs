@@ -23,19 +23,9 @@ pub fn find_offsets<F: Fn(f64) + Sync>(estimator: &PoseEstimator, ranges: &[(i64
         gyro.get_motion_data().len()
     };
     if sync_params.calc_initial_fast && !ranges.is_empty() && raw_imu_len > 0 {
-        fn median(mut v: Vec<f64>) -> f64 {
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let len = v.len();
-            if (len % 2) == 0 {
-                (v[len / 2 - 1] + v[len / 2]) / 2.0
-            } else {
-                v[len / 2]
-            }
-        }
-
         let offsets = super::essential_matrix::find_offsets(estimator, &ranges, &sync_params, params, &progress_cb, cancel_flag.clone());
         if !offsets.is_empty() {
-            let median_offset = median(offsets.iter().map(|x| x.1).collect());
+            let median_offset = crate::util::median(offsets.iter().map(|x| x.1).collect());
             sync_params.initial_offset = median_offset;
             sync_params.initial_offset_inv = false;
             sync_params.search_size = 3000.0;
