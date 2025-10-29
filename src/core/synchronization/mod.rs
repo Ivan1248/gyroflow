@@ -136,6 +136,17 @@ pub struct PoseEstimator {
 }
 
 impl PoseEstimator {
+    /// Time window constants for optical flow search (in microseconds)
+    // TODO: Investigate: the value was 2000 initially, but visualization was visible only in a few
+    // frames for Insta360 videos
+    const OF_TIME_RADIUS_US: i64 = 30_000; // 30ms
+    /// Maximum allowed gap within a motion estimation range (in microseconds)
+    const MAX_RANGE_GAP_US: i64 = 100_000; // 100ms
+    /// Angle threshold for optical flow line filtering (in degrees)
+    const OF_FILTER_ANGLE_THRESHOLD_DEG: f32 = 30.0;
+    /// Scaling factor for low-pass filter frequency storage (multiplied by 100 for integer storage)
+    const LPF_FREQ_SCALE: f64 = 100.0;
+
     /// Creates an isolated clone that copies current computed data but creates independent state.
     pub fn clone_isolated(&self) -> Self {
         Self {
@@ -290,20 +301,17 @@ impl PoseEstimator {
         self.recalculate_gyro_data(fps, false);
     }
 
+    /// Filters out optical flow lines that deviate more than 30 degrees from the average angle.
+    /// This helps remove outliers, which can be useful for video stabilization and synchronization.
     pub fn filter_of_lines(lines: &OpticalFlowPairWithTs, scale: f64) -> OpticalFlowPairWithTs {
         if let Some(lines) = lines {
-            let mut sum_angles = 0.0;
-            lines.0.1.iter().zip(lines.1.1.iter()).for_each(|(p1, p2)| {
-                sum_angles += (p2.1 - p1.1).atan2(p2.0 - p1.0)
-            });
-            let avg_angle = sum_angles / lines.0.1.len() as f32;
-
+            let angles = lines.0.1.iter().zip(lines.1.1.iter()).map(|(p1, p2)| (p2.1 - p1.1).atan2(p2.0 - p1.0)).collect::<Vec<f32>>();
+            let avg_angle = angles.iter().sum::<f32>() / angles.len() as f32;
             let scale = scale as f32;
 
-            let (lines0, lines1) = lines.0.1.iter().zip(lines.1.1.iter()).filter_map(|(p1, p2)| {
-                let angle = (p2.1 - p1.1).atan2(p2.0 - p1.0);
+            let (lines0, lines1) = lines.0.1.iter().zip(lines.1.1.iter()).zip(angles.iter()).filter_map(|((p1, p2), angle)| {
                 let diff = (angle - avg_angle).abs();
-                if diff < 30.0 * (std::f32::consts::PI / 180.0) {  // 30 degrees
+                if diff < Self::OF_FILTER_ANGLE_THRESHOLD_DEG * (std::f32::consts::PI / 180.0) {  // 30 degrees
                     Some(((p1.0 * scale, p1.1 * scale), (p2.0 * scale, p2.1 * scale)))
                 } else {
                     None
@@ -314,6 +322,22 @@ impl PoseEstimator {
         } else {
             None
         }
+    }
+
+    pub fn rgba_to_gray(width: u32, height: u32, stride: u32, slice: &[u8]) -> GrayImage {
+        use image::Pixel;
+        let mut img = image::GrayImage::new(width, height);
+        for x in 0..width {
+            for y in 0..height {
+                let pix_pos = ((y * stride + x) * 4) as usize;
+                img.put_pixel(x, y, image::Rgba::from_slice(&slice[pix_pos..pix_pos + 4]).to_luma());
+            }
+        }
+        img
+    }
+    pub fn yuv_to_gray(_width: u32, height: u32, stride: u32, slice: &[u8]) -> Option<GrayImage> {
+        // TODO: maybe a better way than using stride as width?
+        image::GrayImage::from_raw(stride as u32, height, slice[0..(stride*height) as usize].to_vec())
     }
 
     pub fn cache_optical_flow(&self, num_frames: usize, params: &ComputeParams) {
@@ -353,7 +377,7 @@ impl PoseEstimator {
 
     pub fn get_of_lines_for_timestamp(&self, timestamp_us: &i64, next_no: usize, scale: f64, num_frames: usize, filter: bool) -> (OpticalFlowPairWithTs, Option<(u32, u32)>) {
         if let Some(l) = self.sync_results.try_read() {
-            if let Some(first_ts) = l.get_closest(timestamp_us, 2000).map(|v| v.timestamp_us) {
+            if let Some(first_ts) = l.get_closest(timestamp_us, Self::OF_TIME_RADIUS_US).map(|v| v.timestamp_us) {
                 let mut iter = l.range(first_ts..);
                 for _ in 0..next_no { iter.next(); }
                 if let Some((_, curr)) = iter.next() {
@@ -388,12 +412,12 @@ impl PoseEstimator {
     }
 
     pub fn lowpass_filter(&self, freq: f64, fps: f64) {
-        self.lpf.store((freq * 100.0) as u32, SeqCst);
+        self.lpf.store((freq * Self::LPF_FREQ_SCALE) as u32, SeqCst);
         self.recalculate_gyro_data(fps, false);
     }
 
     pub fn recalculate_gyro_data(&self, fps: f64, final_pass: bool) {
-        let lpf = self.lpf.load(SeqCst) as f64 / 100.0;
+        let lpf = self.lpf.load(SeqCst) as f64 / Self::LPF_FREQ_SCALE;
 
         let mut gyro = BTreeMap::new();
         let mut quats = TimeQuat::new();
@@ -537,7 +561,7 @@ impl PoseEstimator {
         let mut prev_ts = 0;
         let mut curr_range_start = 0;
         for f in self.sync_results.read().keys() {
-            if f - prev_ts > 100000 { // 100ms
+            if f - prev_ts > Self::MAX_RANGE_GAP_US {
                 if curr_range_start != prev_ts {
                     ranges.push((curr_range_start, prev_ts));
                 }
