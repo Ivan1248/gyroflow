@@ -187,6 +187,25 @@ impl PoseEstimator {
             .collect()
     }
 
+    /// Builds a projection filter for a specific frame timestamp and optical flow size
+    fn get_patch_filter_for_frame(compute_params: &ComputeParams, timestamp_ms: f64, optical_flow_size: (u32, u32)) -> Option<PatchFilterFn> {
+        // Build per-pair projection filter from current lens data (camera matrix + model)
+        let (camera_matrix, distortion_coeffs, radial_limit, _sx, _sy, _fl) = crate::stabilization::FrameTransform::get_lens_data_at_timestamp(compute_params, timestamp_ms, compute_params.framebuffer_inverted);
+        let use_radial = matches!(compute_params.distortion_model.id(), "opencv_fisheye" | "opencv_standard" | "poly3" | "poly5" | "ptlens") && radial_limit > 0.0;
+        // Scale intrinsics to the optical-flow image size
+        let (of_w, of_h) = optical_flow_size;
+        let sx = of_w.max(1) as f64 / compute_params.width.max(1) as f64;
+        let sy = of_h.max(1) as f64 / compute_params.height.max(1) as f64;
+        let mut k_scaled = camera_matrix;
+        k_scaled[(0,0)] *= sx; k_scaled[(1,1)] *= sy; k_scaled[(0,2)] *= sx; k_scaled[(1,2)] *= sy;
+
+        if use_radial {
+            patch_filter_from_camera(&k_scaled, radial_limit as f32)
+        } else {
+            patch_filter_from_model(&compute_params.distortion_model, &k_scaled, &distortion_coeffs, of_w as i32, of_h as i32)
+        }
+    }
+
     /// Computes camera motion between unprocessed consecutive frames using optical flow and pose estimation.
     pub fn process_detected_frames(&self, fps: f64, scaled_fps: f64, params: &ComputeParams) {
         let every_nth_frame = self.every_nth_frame.load(SeqCst) as f64;
@@ -229,8 +248,10 @@ impl PoseEstimator {
                             // Unlock the mutex for estimate_pose
                             drop(l);
 
+                            let patch_filter = Self::get_patch_filter_for_frame(params, *ts as f64 / 1000.0, curr_of.size());
+
                             // Compute optical flow and relative pose between frames
-                            if let Some(rp) = pose.estimate_relative_pose(&curr_of.optical_flow_to(&next_of), curr_of.size(), params, *ts, *next_ts) {
+                            if let Some(rp) = pose.estimate_relative_pose(&curr_of.optical_flow_to(&next_of, patch_filter.as_ref()), curr_of.size(), params, *ts, *next_ts) {
                                 // Store rotation, translation direction, and quality metrics in self.sync_results
                                 let mut l = results.write();
                                 if let Some(x) = l.get_mut(ts) {
@@ -292,24 +313,24 @@ impl PoseEstimator {
         }
     }
 
-    pub fn cache_optical_flow(&self, num_frames: usize) {
-        // Computes and caches the optical flow for the given number of frames 
-        // in self.sync_results[i].
+    pub fn cache_optical_flow(&self, num_frames: usize, params: &ComputeParams) {
+        // Computes and caches the optical flow for the given number of frames
+        // in self.sync_results[i + d] (target frames).
         let l = self.sync_results.read();
         let keys: Vec<i64> = l.keys().copied().collect();
         for (i, k) in keys.iter().enumerate() {
             if let Some(from_fr) = l.get(k) {
-                if from_fr.optical_flow.try_borrow().map(|of| !of.is_empty()).unwrap_or_default() {
-                    // We already have OF for this frame
-                    continue;
-                }
+                // Skip if we've already computed optical flow for this source frame
+                // (we'll store the results in the target frames)
                 for d in 1..=num_frames {
                     if let Some(to_key) = keys.get(i + d) {
                         if let Some(to_item) = l.get(to_key) {
                             if from_fr.frame_no + d == to_item.frame_no {
-                                let of = from_fr.of_method.optical_flow_to(&to_item.of_method);
-                                if let Ok(mut from_of) = from_fr.optical_flow.try_borrow_mut() {
-                                    from_of.insert(d,
+                                // Build per-pair projection filter using from_ts
+                                let patch_filter = Self::get_patch_filter_for_frame(params, *k as f64 / 1000.0, from_fr.frame_size);
+                                let of = from_fr.of_method.optical_flow_to(&to_item.of_method, patch_filter.as_ref());
+                                if let Ok(mut to_of) = to_item.optical_flow.try_borrow_mut() {
+                                    to_of.insert(d,
                                         of.map(|of| ((from_fr.timestamp_us, of.0), (to_item.timestamp_us, of.1)))
                                     );
                                 }

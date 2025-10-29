@@ -25,6 +25,8 @@ float2 distort_point(float x, float y, float z, __global KernelParams *params) {
     );
 }
 
+// The GPU path always returns the last iterate and is used for rendering/undistortion only. 
+// Relative pose estimation relies on the CPU version to return None to indicate validity.
 float2 undistort_point(float2 p, __global KernelParams *params) {
     float2 P = p;
 

@@ -26,6 +26,8 @@ fn distort_point(px: f32, py: f32, pz: f32) -> vec2<f32> {
     );
 }
 
+// The GPU path always returns the last iterate and is used for rendering/undistortion only. 
+// Relative pose estimation relies on the CPU version to return None to indicate validity.
 fn undistort_point(p: vec2<f32>) -> vec2<f32> {
     var pp = p;
 

@@ -26,6 +26,8 @@ vec2 distort_point(float x, float y, float z) {
     );
 }
 
+// The GPU path always returns the last iterate and is used for rendering/undistortion only. 
+// Relative pose estimation relies on the CPU version to return None to indicate validity.
 vec2 undistort_point(vec2 p) {
     vec2 P = p;
 

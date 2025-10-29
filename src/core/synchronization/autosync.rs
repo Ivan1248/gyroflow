@@ -197,7 +197,7 @@ impl AutosyncProcess {
         self.estimator.process_detected_frames(self.org_fps, self.scaled_fps, &self.compute_params.read());
         self.estimator.recalculate_gyro_data(self.org_fps, true);
         // Compute and cache optical flow after all frames are processed, before finishing
-        self.estimator.cache_optical_flow(if offset_method == 1 { 2 } else { 1 });
+        self.estimator.cache_optical_flow(if offset_method == 1 { 2 } else { 1 }, &self.compute_params.read());
         self.estimator.cleanup();
 
         // Update gyro_source with the computed estimated motion data

@@ -2,7 +2,7 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 use super::super::OpticalFlowPair;
-use super::{ OpticalFlowTrait, OpticalFlowMethod };
+use super::{ OpticalFlowTrait, OpticalFlowMethod, PatchFilterFn };
 
 use akaze::Akaze;
 use bitarray::{ BitArray, Hamming };
@@ -45,13 +45,24 @@ impl OFAkaze {
 }
 
 impl OpticalFlowTrait for OFAkaze {
-    fn optical_flow_to(&self, to: &OpticalFlowMethod) -> OpticalFlowPair {
+    fn optical_flow_to(&self, to: &OpticalFlowMethod, patch_filter: Option<&PatchFilterFn>) -> OpticalFlowPair {
         if let OpticalFlowMethod::OFAkaze(to) = to {
+            let (w, h) = self.size();
+            let patch_r = 0_f32;
+            
             return Some(Self::match_descriptors(&self.descriptors, &to.descriptors)
                 .into_iter()
-                .map(|(i1, i2)| {
-                    (self.features[i1].clone(), to.features[i2].clone())
-                }).unzip());
+                .filter_map(|(i1, i2)| {
+                    let (x1, y1) = self.features[i1];
+                    let (x2, y2) = to.features[i2];
+                    if let Some(f) = patch_filter {
+                        if !f(x1, y1, patch_r, w as f32, h as f32) || !f(x2, y2, patch_r, w as f32, h as f32) {
+                            return None;
+                        }
+                    }
+                    Some(((x1, y1), (x2, y2)))
+                })
+                .unzip());
         }
         None
     }

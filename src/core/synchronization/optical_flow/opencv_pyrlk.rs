@@ -3,7 +3,7 @@
 
 #![allow(unused_variables, dead_code, unused_mut)]
 use super::super::{ OpticalFlowPair, OpticalFlowPoints };
-use super::{ OpticalFlowTrait, OpticalFlowMethod };
+use super::{ OpticalFlowTrait, OpticalFlowMethod, PatchFilterFn };
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,7 +60,7 @@ impl OpticalFlowTrait for OFOpenCVPyrLK {
     }
     fn features(&self) -> &Vec<(f32, f32)> { &self.features }
 
-    fn optical_flow_to(&self, _to: &OpticalFlowMethod) -> OpticalFlowPair {
+    fn optical_flow_to(&self, _to: &OpticalFlowMethod, patch_filter: Option<&PatchFilterFn>) -> OpticalFlowPair {
         #[cfg(feature = "use-opencv")]
         if let OpticalFlowMethod::OFOpenCVPyrLK(next) = _to {
             let (w, h) = self.size;
@@ -83,8 +83,10 @@ impl OpticalFlowTrait for OFOpenCVPyrLK {
                 let mut status = Mat::default();
                 let mut err = Mat::default();
 
-                opencv::video::calc_optical_flow_pyr_lk(&a1_img, &a2_img, &a1_pts, &mut a2_pts, &mut status, &mut err, Size::new(21, 21), 3, TermCriteria::new(3/*count+eps*/,30,0.01)?, 0, 1e-4)?;
+                let win = Size::new(21, 21);
+                opencv::video::calc_optical_flow_pyr_lk(&a1_img, &a2_img, &a1_pts, &mut a2_pts, &mut status, &mut err, win, 3, TermCriteria::new(3/*count+eps*/,30,0.01)?, 0, 1e-4)?;
 
+                let patch_r = (win.width as f32) * 0.5; // Half of window width
                 let mut pts1 = Vec::with_capacity(status.rows() as usize);
                 let mut pts2 = Vec::with_capacity(status.rows() as usize);
                 for i in 0..status.rows() {
@@ -93,6 +95,13 @@ impl OpticalFlowTrait for OFOpenCVPyrLK {
                         let pt2 = a2_pts.at::<Point2f>(i)?;
                         if pt1.x >= 0.0 && pt1.x < w as f32 && pt1.y >= 0.0 && pt1.y < h as f32
                         && pt2.x >= 0.0 && pt2.x < w as f32 && pt2.y >= 0.0 && pt2.y < h as f32 {
+                            // Apply projection filter if provided
+                            if let Some(filter) = patch_filter {
+                                if !filter(pt1.x, pt1.y, patch_r, w as f32, h as f32) ||
+                                   !filter(pt2.x, pt2.y, patch_r, w as f32, h as f32) {
+                                    continue;
+                                }
+                            }
                             pts1.push((pt1.x as f32, pt1.y as f32));
                             pts2.push((pt2.x as f32, pt2.y as f32));
                         }

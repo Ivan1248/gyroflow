@@ -3,7 +3,7 @@
 
 #![allow(unused_variables, dead_code)]
 use super::super::OpticalFlowPair;
-use super::{ OpticalFlowTrait, OpticalFlowMethod };
+use super::{ OpticalFlowTrait, OpticalFlowMethod, PatchFilterFn };
 
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU32;
@@ -41,7 +41,7 @@ impl OpticalFlowTrait for OFOpenCVDis {
     }
     fn features(&self) -> &Vec<(f32, f32)> { &self.features }
 
-    fn optical_flow_to(&self, _to: &OpticalFlowMethod) -> OpticalFlowPair {
+    fn optical_flow_to(&self, _to: &OpticalFlowMethod, patch_filter: Option<&PatchFilterFn>) -> OpticalFlowPair {
         #[cfg(feature = "use-opencv")]
         if let OpticalFlowMethod::OFOpenCVDis(next) = _to {
             let (w, h) = self.size;
@@ -57,23 +57,33 @@ impl OpticalFlowTrait for OFOpenCVDis {
 
                 let mut of = Mat::default();
                 let mut optflow = opencv::video::DISOpticalFlow::create(opencv::video::DISOpticalFlow_PRESET_FAST)?;  // stride 4, patsh size 8
-                //use opencv::prelude::DISOpticalFlowTraitConst;
+                use opencv::prelude::DISOpticalFlowTraitConst;
                 //log::debug!("DIS patch stride: {}, patch size: {}", optflow.get_patch_stride()?, optflow.get_patch_size()?);
                 optflow.calc(&a1_img, &a2_img, &mut of)?;
 
                 let mut points_a = Vec::new();
                 let mut points_b = Vec::new();
                 // hard-coded grid step size
-                let num_points_over_width = 15_i32;  // TODO: make this a parameter
+                let num_points_over_width = 23_i32;  // TODO: make this a parameter, originally 15
                 let step = w / num_points_over_width;
+                // Determine patch radius from DIS settings if available
+                let patch_radius = if let Ok(ps) = optflow.get_patch_size() { (ps as f32) * 0.5 } else { (step as f32) / 2.0 };
                 // offsets for centering the grid
                 let w_offset = step / 2 + ((w - step) % step) / 2;
                 let h_offset = step / 2 + ((h - step) % step) / 2;
                 for i in (w_offset..a1_img.cols()).step_by(step as usize) {
                     for j in (h_offset..a1_img.rows()).step_by(step as usize) {
                         let pt = of.at_2d::<Vec2f>(j, i)?;
+                        let dest_x = i as f32 + pt[0] as f32;
+                        let dest_y = j as f32 + pt[1] as f32;
+                        // Filter source and destination patch if projection provided
+                        if let Some(filter) = patch_filter {
+                            let src_ok = filter(i as f32, j as f32, patch_radius, w as f32, h as f32);
+                            let dst_ok = filter(dest_x, dest_y, patch_radius, w as f32, h as f32);
+                            if !src_ok || !dst_ok { continue; }
+                        }
                         points_a.push((i as f32, j as f32));
-                        points_b.push((i as f32 + pt[0] as f32, j as f32 + pt[1] as f32));
+                        points_b.push((dest_x, dest_y));
                     }
                 }
 

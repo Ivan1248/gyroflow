@@ -7,21 +7,37 @@ use crate::stabilization::KernelParams;
 pub struct Insta360 { }
 
 impl Insta360 {
+    // NOTE ABOUT VALIDITY AND POSE ESTIMATION:
+    // - This CPU implementation returns `None` when the iterative solve fails to converge
+    //   (see `converged` below). The projection filter for optical flow uses this to
+    //   reject invalid points during relative pose estimation.
+    // - The GPU implementations in `insta360.glsl`, `insta360.wgsl`, and `insta360.cl`
+    //   DO NOT produce a validity flag; they always return the last iterate and are used
+    //   only for rendering/undistortion.
     pub fn undistort_point(&self, point: (f32, f32), params: &KernelParams) -> Option<(f32, f32)> {
         let mut px = point.0;
         let mut py = point.1;
+        let mut converged = false;
 
         for _ in 0..200 {
             let dp = self.distort_point(px, py, 1.0, params);
             let diff = (dp.0 - point.0, dp.1 - point.1);
-            if diff.0.abs() < 1e-6 && diff.1.abs() < 1e-6 {
-                break;
+            let max_diff = diff.0.abs().max(diff.1.abs());
+            // This threshold is intentionally looser than the final break condition to improve 
+            // validity checks for peripheral points without increasing the number of iterations.
+            // Making it too loose (>5e-2) causes invalid points to be accepted.
+            if max_diff < 2e-2 {
+                converged = true;
+                if max_diff < 1e-6 {
+                    break;
+                }
             }
+
             px -= diff.0;
             py -= diff.1;
         }
 
-        Some((px, py))
+        if converged { Some((px, py)) } else { None }
     }
 
     pub fn distort_point(&self, mut x: f32, mut y: f32, z: f32, params: &KernelParams) -> (f32, f32) {
