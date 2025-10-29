@@ -48,7 +48,7 @@ impl EstimateRelativePoseTrait for PoseEightPoint {
                     rotation: nalgebra::Rotation3::from_matrix_unchecked(nalgebra::Matrix3::from_column_slice(rot.matrix().as_slice())),
                     transl_dir: tdir,
                     inlier_ratio: None,
-                    median_epi_err: None,
+                    inlier_mask: None,
                 });
             }
         }

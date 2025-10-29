@@ -39,6 +39,36 @@ impl Clone for MotionDirectionAlignment {
 }
 
 impl MotionDirectionAlignment {
+    /// Default parameters for motion direction alignment
+    const DEFAULT_MIN_INLIER_RATIO: f64 = 0.5;
+
+    /// Time window constants (in microseconds)
+    const VALID_TIME_RADIUS_US: i64 = 50_000; // 50ms
+    const FALLBACK_TIME_RADIUS_US: i64 = 250_000; // 250ms
+    /// Small epsilon for floating point comparisons
+    const DEGENERATE_NORM_EPSILON: f64 = 1e-6;
+    /// Threshold for converting float to bool
+    const BOOL_THRESHOLD: f64 = 0.5;
+
+    /// Convert translation direction to camera motion direction
+    fn translation_to_motion_direction(&self, tdir: [f64; 3], compute_params: &ComputeParams) -> nalgebra::Vector3<f64> {
+        // Flip sign to get camera motion direction
+        let sign_corr = if tdir[2] <= 0.0 { /*forward*/ -1.0} else if self.flip_backward_dir {1.0} else {-1.0};
+        // If is_back_camera, convert from back camera frame to front camera frame by 180° rotation about Y and flipping the sign
+        let back_corr = if compute_params.is_back_camera { -1.0 } else { 1.0 };
+        sign_corr * nalgebra::Vector3::new(tdir[0], back_corr * tdir[1], tdir[2])
+    }
+
+    /// Find the closest frame with good quality motion data within an expanded search window
+    /// Returns (motion_direction, time_distance_us) where time_distance_us is how far back/forward in time the data came from
+    fn find_closest_good_motion_data(&self, compute_params: &ComputeParams, timestamp_us: i64, time_radius_us: i64) -> Option<(nalgebra::Vector3<f64>, i64)> {
+        if let Some((tdir, _, dist)) = compute_params.pose_estimator.find_closest_transl_dir(timestamp_us, time_radius_us, Some(self.min_inlier_ratio)) {
+            let motion_dir = self.translation_to_motion_direction(tdir, compute_params);
+            return Some((motion_dir, dist));
+        }
+        None
+    }
+
     pub fn set_parameter(&mut self, name: &str, val: f64) {
         match name {
             "min_inlier_ratio" => self.min_inlier_ratio = val,
@@ -110,30 +140,24 @@ impl MotionDirectionAlignment {
 
         // Debug counters
         let mut num_frames: usize = 0;
-        let mut num_targets_used: usize = 0;
-        let mut num_skipped: usize = 0;
-        let mut num_skipped_degenerate: usize = 0;
+        let mut num_used: usize = 0;
+        let mut num_valid: usize = 0; // Frames that would be used with just 50ms window
 
-        // Iterate timestamps, blend towards motion direction look-at if quality OK, else keep gyro orientation
+        // Iterate timestamps, blend towards closest good quality motion direction, else keep gyro orientation
         for (ts, quat) in quats.iter() {
             num_frames += 1;
-            
-            // Get motion direction within window
-            let window_us = 50_000_i64;
-            let motion_dir_opt: Option<nalgebra::Vector3<f64>> = if let Some((tdir, qual)) = compute_params.pose_estimator.get_transl_dir_near(*ts, window_us, false) {
-                if qual.meets_thresholds(self.min_inlier_ratio, self.max_epi_err) {
-                    // Flip sign to get camera motion direction
-                    let sign_corr = if tdir[2] <= 0.0 { /*forward*/ -1.0} else if self.flip_backward_dir {1.0} else {-1.0};
-                    // If is_back_camera, convert from back camera frame to front camera frame by 180° rotation about Y and flipping the sign
-                    let back_corr = if compute_params.is_back_camera { -1.0 } else { 1.0 };
-                    Some(sign_corr * nalgebra::Vector3::new(tdir[0], back_corr * tdir[1], tdir[2]))
-                } else { None }
-            } else { num_skipped += 1; None };
 
-            let target = if let Some(motion_dir) = motion_dir_opt {
+            // Get motion direction within window, with fallback to closest good quality motion direction
+            let motion_data_opt = self.find_closest_good_motion_data(compute_params, *ts, Self::FALLBACK_TIME_RADIUS_US);
+
+            let target = if let Some((motion_dir, time_dist)) = motion_data_opt {
+                // Track frames that used data from within the 50ms window
+                if time_dist <= Self::VALID_TIME_RADIUS_US {
+                    num_valid += 1;
+                }
                 // Rotate current camera orientation so its local Z axis aligns with motion direction (-tdir is in camera coords)
                 let n = motion_dir.norm();
-                if n > 1e-6 {
+                if n > Self::DEGENERATE_NORM_EPSILON {
                     let ld = motion_dir / n;
                     // X = right, Y = up, Z = forward (left-handed)
                     // For some reason, X has to be flipped to match the quaternion-to-image convention
@@ -143,11 +167,15 @@ impl MotionDirectionAlignment {
                     let up_world = *quat * nalgebra::Vector3::<f64>::new(0.0, 1.0, 0.0);
                     let target_q = nalgebra::UnitQuaternion::face_towards(&dir_world, &up_world);
                     Some(target_q)
-                } else { num_skipped_degenerate += 1; None }
-            } else { None };
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let new_q = if let Some(target_q) = target { 
-                num_targets_used += 1;
+                num_used += 1;
                 quat.slerp(&target_q, 1.0) 
             } else { *quat };
             out.insert(*ts, new_q);
@@ -156,27 +184,16 @@ impl MotionDirectionAlignment {
         // Store status for UI
         let mut msgs: Vec<serde_json::Value> = Vec::new();
         if num_frames > 0 {
-            let used_percent = (num_targets_used as f64 * 100.0 / num_frames as f64).round();
+            let used_percent = (num_used as f64 * 100.0 / num_frames as f64).round();
+            let valid_percent = (num_valid as f64 * 100.0 / num_frames as f64).round();
             msgs.push(serde_json::json!({
                 "type": "Label",
-                "text": format!("Motion direction: used {}% of frames ({} / {})", used_percent as i64, num_targets_used, num_frames)
+                "text": format!("Motion direction: {:.0}% of frames have good quality motion data ({:.0}% within {} ms)", valid_percent, used_percent, Self::FALLBACK_TIME_RADIUS_US / 1000)
             }));
-            if num_targets_used == 0 {
+            if num_used == 0 {
                 msgs.push(serde_json::json!({
                     "type": "Label",
-                    "text": "No valid motion directions found within the window. Consider increasing the window or adjusting pose estimation method."
-                }));
-            }
-            if num_skipped > 0 {
-                msgs.push(serde_json::json!({
-                    "type": "Label",
-                    "text": format!("No motion sample near timestamp for {} frames. Increase motion window.", num_skipped)
-                }));
-            }
-            if num_skipped_degenerate > 0 {
-                msgs.push(serde_json::json!({
-                    "type": "Label",
-                    "text": format!("Degenerate motion direction for {} frames.", num_skipped_degenerate)
+                    "text": format!("No valid motion directions in video. Consider changing settings.")
                 }));
             }
         }

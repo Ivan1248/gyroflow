@@ -432,7 +432,7 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                 let mut dirs: Vec<[f64; 3]> = Vec::new();
                                 for (start, end) in ranges {
                                     let mid = (start + end) / 2;
-                                    if let Some((tdir, _q)) = stab.pose_estimator.get_transl_dir_near(mid, end - start, true) {
+                                    if let Some((tdir, _q)) = stab.pose_estimator.get_transl_dir_near(mid, end - start) {
                                         dirs.push(tdir);
                                     }
                                 }

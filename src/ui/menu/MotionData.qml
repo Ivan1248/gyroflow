@@ -1283,7 +1283,7 @@ MenuItem {
             text: qsTr("Pose method");
             ComboBox {
                 id: poseMethod;
-                model: ["Essential (LMEDS)", "Essential (RANSAC)", "Almeida", "EightPoint", "findHomography"];
+                model: ["findEssentialMat (LMedS)", "findEssentialMat (RANSAC)", "Almeida", "EightPoint", "findHomography"];
                 font.pixelSize: 12 * dpiScale;
                 width: parent.width;
                 currentIndex: 0; // Essential LMEDS default

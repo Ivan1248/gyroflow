@@ -798,8 +798,8 @@ impl StabilizationManager {
 
     fn draw_motion_direction(&self, drawing: &mut DrawCanvas, timestamp_us: i64, size: (usize, usize), y_inverted: bool) {
         // Get motion direction data or use default
-        let window_us: i64 = 50_000; // 50ms, no smoothing for visualization
-        let (tdir, qual, color) = if let Some((tdir, qual)) = self.pose_estimator.get_transl_dir_near(timestamp_us, window_us, false) {
+        let time_radius_us: i64 = 50_000; // 50ms, no smoothing for visualization
+        let (tdir, qual, color) = if let Some((tdir, qual)) = self.pose_estimator.get_transl_dir_near(timestamp_us, time_radius_us) {
             (tdir, qual, if tdir[2] > 0.0 { Color::Red } else { Color::Green })
         } else {
             // No motion data available, use default direction (forward)
@@ -896,18 +896,28 @@ impl StabilizationManager {
 
             if p.show_optical_flow {
                 let num_frames = if p.of_method == 2 { 1 } else { 3 };
+                // Get inlier mask for coloring (only available for d=1)
+                let inlier_mask = self.pose_estimator.get_inlier_mask_for_timestamp(&timestamp_us, 0, 1);
+
                 // Inlined get_opticalflow_pixels with start point coloring
                 for i in 0..num_frames {
-                    match self.pose_estimator.get_of_lines_for_timestamp(&timestamp_us, i, 1.0, 1, false) {
+                    match self.pose_estimator.get_of_lines_for_timestamp(&timestamp_us, 0, 1.0, i+1, false) {
                         (Some(lines), Some(frame_size)) => {
                             let ratio = size.1 as f32 / frame_size.1.max(1) as f32;
-                            lines.0.1.into_iter().zip(lines.1.1.into_iter()).for_each(|(p1, p2)| {
-                                // Draw the start point in a consistent color to distinguish from the line
-                                drawing.put_pixel((p1.0 * ratio) as i32, (p1.1 * ratio) as i32, Color::Green, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
+                            lines.0.1.into_iter().zip(lines.1.1.into_iter()).enumerate().for_each(|(idx, (p1, p2))| {
+                                // Determine point color based on inlier status (only for d=1)
+                                let point_color = if i == 0 && inlier_mask.is_some() && idx < inlier_mask.as_ref().unwrap().len() && inlier_mask.as_ref().unwrap()[idx] == 0 {
+                                    Color::Red   // Outlier
+                                } else {
+                                    Color::Green // Default or no inlier data available
+                                };
+
+                                // Draw the start point
+                                drawing.put_pixel((p1.0 * ratio) as i32, (p1.1 * ratio) as i32, point_color, Alpha::Alpha100, Stage::OnInput, y_inverted, 3);
                                 // Draw the line
                                 let line = line_drawing::Bresenham::new(((p1.0 * ratio) as isize, (p1.1 * ratio) as isize), ((p2.0 * ratio) as isize, (p2.1 * ratio) as isize));
                                 for point in line {
-                                    drawing.put_pixel(point.0 as i32, point.1 as i32, Color::Yellow, Alpha::Alpha100, Stage::OnInput, y_inverted, 1);
+                                    drawing.put_pixel(point.0 as i32, point.1 as i32, point_color, Alpha::Alpha100, Stage::OnInput, y_inverted, 1);
                                 }
                             });
                         }

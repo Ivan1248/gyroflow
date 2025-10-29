@@ -76,6 +76,8 @@ impl DrawCanvas {
                 let pos = (((y as f32 / self.scale as f32 + ystep as f32 + adj).floor()) * w as f32 + (x as f32 / self.scale as f32 + xstep as f32 + adj).floor()).round() as i32;
                 if pos >= 0 && pos < self.buffer.len() as i32 {
                     self.has_any_pixels = true;
+                    // TODO: Fix bug: when color is Color::Blue, undistortion is not applied in the shader, 
+                    // This can be tested by changing optical flow visualization color to blue.
                     self.buffer[pos as usize] =
                         ((color as u8) << 3) |
                         ((alpha as u8) << 1) |

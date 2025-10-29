@@ -24,16 +24,13 @@ use super::gyro_source::TimeIMU;
 pub struct PoseQuality {
     /// Ratio of inlier points to total points (0.0 to 1.0)
     pub inlier_ratio: f64,
-    /// Median epipolar error in pixels // TODO: choose the best unit in GUI
-    pub median_epi_err: f64,
 }
 
 impl PoseQuality {
     /// Create a new PoseQuality with the given values
-    pub fn new(inlier_ratio: f64, median_epi_err: f64) -> Self {
+    pub fn new(inlier_ratio: f64) -> Self {
         Self {
             inlier_ratio: inlier_ratio.max(0.0).min(1.0), // Clamp to [0, 1]
-            median_epi_err: median_epi_err.max(0.0), // Ensure non-negative
         }
     }
 
@@ -41,14 +38,12 @@ impl PoseQuality {
     pub fn default() -> Self {
         Self {
             inlier_ratio: 0.0,
-            median_epi_err: 0.0,
         }
     }
 
     /// Check if the pose quality meets minimum thresholds
-    pub fn meets_thresholds(&self, min_inlier_ratio: f64, max_epi_err: f64) -> bool {
-        self.inlier_ratio >= min_inlier_ratio && 
-        (max_epi_err <= 0.0 || self.median_epi_err <= max_epi_err)
+    pub fn meets_thresholds(&self, min_inlier_ratio: f64) -> bool {
+        self.inlier_ratio >= min_inlier_ratio
     }
 }
 
@@ -120,7 +115,9 @@ pub struct FrameResult {
     pub pose_quality: Option<PoseQuality>,
 
     #[serde(skip)]
-    optical_flow: RefCell<BTreeMap<usize, OpticalFlowPairWithTs>>
+    optical_flow: RefCell<BTreeMap<usize, OpticalFlowPairWithTs>>,
+    #[serde(skip)]
+    pub inlier_masks: RefCell<BTreeMap<usize, Vec<u8>>>
 }
 unsafe impl Send for FrameResult {}
 unsafe impl Sync for FrameResult {}
@@ -173,7 +170,8 @@ impl PoseEstimator {
                 euler: None,
                 transl_dir: None,
                 pose_quality: None,
-                optical_flow: Default::default()
+                optical_flow: Default::default(),
+                inlier_masks: Default::default()
             };
             let mut l = self.sync_results.write();
             l.entry(timestamp_us).or_insert(result);
@@ -263,9 +261,14 @@ impl PoseEstimator {
                                         x.transl_dir = Some([tdir.x, tdir.y, tdir.z]);
                                     }
                                     x.pose_quality = Some(PoseQuality::new(
-                                        rp.inlier_ratio.unwrap_or(0.0), 
-                                        rp.median_epi_err.unwrap_or(0.0)
+                                        rp.inlier_ratio.unwrap_or(0.0)
                                     ));
+                                    // Cache inlier mask for this pair (d=1)
+                                    if let Some(mask) = rp.inlier_mask {
+                                        if let Ok(mut im) = x.inlier_masks.try_borrow_mut() {
+                                            im.insert(1, mask);
+                                        }
+                                    }
                                 } else {
                                     log::warn!("Failed to get ts {}", ts);
                                 }
@@ -369,21 +372,21 @@ impl PoseEstimator {
         (None, None)
     }
 
-    pub fn rgba_to_gray(width: u32, height: u32, stride: u32, slice: &[u8]) -> GrayImage {
-        use image::Pixel;
-        let mut img = image::GrayImage::new(width, height);
-        for x in 0..width {
-            for y in 0..height {
-                let pix_pos = ((y * stride + x) * 4) as usize;
-                img.put_pixel(x, y, image::Rgba::from_slice(&slice[pix_pos..pix_pos + 4]).to_luma());
+    pub fn get_inlier_mask_for_timestamp(&self, timestamp_us: &i64, next_no: usize, num_frames: usize) -> Option<Vec<u8>> {
+        if let Some(l) = self.sync_results.try_read() {
+            if let Some(first_ts) = l.get_closest(timestamp_us, Self::OF_TIME_RADIUS_US).map(|v| v.timestamp_us) {
+                let mut iter = l.range(first_ts..);
+                for _ in 0..next_no { iter.next(); }
+                if let Some((_, curr)) = iter.next() {
+                    if let Ok(m) = curr.inlier_masks.try_borrow() {
+                        return m.get(&num_frames).cloned();
+                    }
+                }
             }
         }
-        img
+        None
     }
-    pub fn yuv_to_gray(_width: u32, height: u32, stride: u32, slice: &[u8]) -> Option<GrayImage> {
-        // TODO: maybe a better way than using stride as width?
-        image::GrayImage::from_raw(stride as u32, height, slice[0..(stride*height) as usize].to_vec())
-    }
+
     pub fn lowpass_filter(&self, freq: f64, fps: f64) {
         self.lpf.store((freq * 100.0) as u32, SeqCst);
         self.recalculate_gyro_data(fps, false);
@@ -483,83 +486,52 @@ impl PoseEstimator {
         *self.estimated_quats.write() = quats;
     }
 
-    pub fn get_transl_dir_near(&self, timestamp_us: i64, window_us: i64, use_average: bool) -> Option<([f64; 3], PoseQuality)> {
-        // Use try_read to avoid blocking the UI thread during motion direction stabilization
+    pub fn get_transl_dir_near(&self, timestamp_us: i64, time_radius_us: i64) -> Option<([f64; 3], PoseQuality)> {
+        self.find_closest_transl_dir(timestamp_us, time_radius_us, None).map(|(t, q, _)| (t, q))
+    }
+
+    /// Generic function to find closest translation direction with optional quality filtering
+    /// quality_filter: if Some(min_inlier_ratio), only return data that meets this threshold
+    /// Returns (translation_direction, pose_quality, time_distance_us)
+    pub fn find_closest_transl_dir(&self, timestamp_us: i64, time_radius_us: i64, min_inlier_ratio: Option<f64>) -> Option<([f64; 3], PoseQuality, i64)> {
+        // Use try_read to avoid blocking the UI thread
         let l = match self.sync_results.try_read() {
-            Some(lock) => {
-                lock
-            },
+            Some(lock) => {lock},
             None => {
                 // If we can't get the lock immediately, return None to avoid blocking
-                println!("get_transl_dir_near() could not acquire sync_results read lock, skipping motion direction lookup");
+                println!("find_closest_transl_dir() could not acquire sync_results read lock, skipping motion direction lookup");
                 return None;
             }
         };
-        
-        let start = timestamp_us.saturating_sub(window_us);
-        let end = timestamp_us.saturating_add(window_us);
 
-        if use_average {
-            // Collect all translation directions and pose qualities in the window
-            let mut translations = Vec::new();
-            let mut pose_qualities = Vec::new();
-            
-            for (ts, fr) in l.range(start..=end) {
-                if let Some(t) = fr.transl_dir {
-                    translations.push(t);
-                    pose_qualities.push(fr.pose_quality.clone().unwrap_or_default());
-                }
-            }
-            
-            if translations.is_empty() {
-                return None;
-            }
-            
-            // Calculate average translation direction
-            let mut avg_translation = [0.0; 3];
-            for t in &translations {
-                avg_translation[0] += t[0];
-                avg_translation[1] += t[1];
-                avg_translation[2] += t[2];
-            }
-            let count = translations.len() as f64;
-            avg_translation[0] /= count;
-            avg_translation[1] /= count;
-            avg_translation[2] /= count;
-            
-            // Calculate average pose quality
-            let mut avg_inlier_ratio = 0.0;
-            let mut avg_median_epi_err = 0.0;
-            for pq in &pose_qualities {
-                avg_inlier_ratio += pq.inlier_ratio;
-                avg_median_epi_err += pq.median_epi_err;
-            }
-            avg_inlier_ratio /= count;
-            avg_median_epi_err /= count;
-            
-            let avg_pose_quality = PoseQuality::new(avg_inlier_ratio, avg_median_epi_err);
-            
-            Some((avg_translation, avg_pose_quality))
-        } else {
-            // Original behavior: find closest frame
-            let mut best: Option<(i64, [f64; 3], PoseQuality)> = None;
-            
-            for (ts, fr) in l.range(start..=end) {
-                if let Some(t) = fr.transl_dir {
-                    let qual = fr.pose_quality.clone().unwrap_or_default();
-                    let dist = (timestamp_us - *ts).abs();
-                    match best {
-                        None => best = Some((dist, t, qual)),
-                        Some((b_dist, _, _)) if dist < b_dist => best = Some((dist, t, qual)),
-                        _ => {}
+        let start = timestamp_us.saturating_sub(time_radius_us);
+        let end = timestamp_us.saturating_add(time_radius_us);
+
+        // Find closest frame
+        let mut best: Option<(i64, [f64; 3], PoseQuality)> = None;
+
+        for (ts, fr) in l.range(start..=end) {
+            if let Some(t) = fr.transl_dir {
+                let qual = fr.pose_quality.clone().unwrap_or_default();
+
+                // Apply quality filter if specified
+                if let Some(min_inlier_ratio) = min_inlier_ratio {
+                    if !qual.meets_thresholds(min_inlier_ratio) {
+                        continue; // Skip frames that don't meet quality thresholds
                     }
                 }
+
+                let dist = (timestamp_us - *ts).abs();
+                if best.as_ref().map_or(true, |(b_dist, _, _)| dist < *b_dist) {
+                    best = Some((dist, t, qual));
+                }
             }
-            
-            best.map(|(_, t, q)| (t, q))
         }
+
+        best.map(|(dist, t, q)| (t, q, dist))
     }
 
+    /// Returns a vector of timestamp ranges for which motion estimation was performed
     pub fn get_ranges(&self) -> Vec<(i64, i64)> {
         let mut ranges = Vec::new();
         let mut prev_ts = 0;

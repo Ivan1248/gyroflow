@@ -16,7 +16,7 @@ pub struct RelativePose {
     pub rotation: Rotation3<f64>,
     pub transl_dir: Option<UnitVector3<f64>>, // unit vector in camera frame, (0, 0, -1) if the camera is moving forward
     pub inlier_ratio: Option<f64>,
-    pub median_epi_err: Option<f64>,
+    pub inlier_mask: Option<Vec<u8>>, // 1=inlier, 0=outlier; aligned with pts order
 }
 
 #[enum_delegate::register]
@@ -45,4 +45,3 @@ impl From<&PoseMethodKind> for RelativePoseMethod {
         }
     }
 }
-

@@ -16,7 +16,7 @@ use crate::stabilization::*;
 pub enum RobustMethod {
     /// Least Median of Squares - more robust to outliers, slower
     LMEDS,
-    /// Random Sample Consensus - faster, provides inlier mask
+    /// Random Sample Consensus - faster
     RANSAC,
 }
 
@@ -58,6 +58,8 @@ impl EstimateRelativePoseTrait for PoseFindEssentialMat {
 
         #[cfg(feature = "use-opencv")]
         let result = || -> Result<RelativePose, opencv::Error> {
+            use crate::util::cv_to_mat3;
+
             let pts11 = undistort_points_for_optical_flow(&pts1, timestamp_us, params, size);
             let pts22 = undistort_points_for_optical_flow(&pts2, next_timestamp_us, params, size);
 
@@ -66,54 +68,39 @@ impl EstimateRelativePoseTrait for PoseFindEssentialMat {
 
             let a1_pts = Mat::from_slice(&pts1)?;
             let a2_pts = Mat::from_slice(&pts2)?;
-
-            let identity = Mat::eye(3, 3, opencv::core::CV_64F)?;
-
+            let identity = Mat::eye(3, 3, opencv::core::CV_64F)?;  // identity camera matrix
             let (e, mut mask) = find_essential_mat_wrapper(&a1_pts, &a2_pts, &identity, self.robust_method)?;
 
             let mut r1 = Mat::default();
             let mut t = Mat::default();
-            // Note: camera coordinates; +Z forward convention maintained
-            let inliers = opencv::calib3d::recover_pose_triangulated(&e, &a1_pts, &a2_pts, &identity, &mut r1, &mut t, 100000.0, &mut mask, &mut Mat::default())?;
-            if inliers < 10 { return Err(opencv::Error::new(0, "Model not found".to_string())); }
+            // Note: camera coordinates; +Z forward convention
+            let num_inliers = opencv::calib3d::recover_pose_triangulated(&e, &a1_pts, &a2_pts, &identity, &mut r1, &mut t, 100000.0, &mut mask, &mut Mat::default())?;
+            if num_inliers < 10 { return Err(opencv::Error::new(0, "Model not found".to_string())); }
+            
+            // Extract rotation and translation direction
+            let rotation = Rotation3::from_matrix_unchecked(crate::util::cv_to_mat3(&r1)?);
+            let t = nalgebra::Vector3::new(*t.at_2d::<f64>(0, 0)?, *t.at_2d::<f64>(1, 0)?, *t.at_2d::<f64>(2, 0)?);
+            let transl_dir = if t.norm() > 0.0 { Some(nalgebra::Unit::new_normalize(t)) } else { None };
 
-            // inlier ratio
-            let rows = a1_pts.rows();
-            let total = if rows <= 0 { 1.0 } else { rows as f64 };
-            let inlier_ratio = (inliers as f64 / total).min(1.0);
+            // Inlier ratio and mask (after recover_pose_triangulated)
+            let num_points = mask.rows(); // Number of points is number of columns for 1xN point array
+            let inlier_ratio = Some((num_inliers as f64 / num_points as f64).min(1.0));
+            let mut inlier_mask_vec = Vec::with_capacity(mask.rows() as usize);
+            for i in 0..mask.rows() {
+                inlier_mask_vec.push(*mask.at_2d::<u8>(i, 0)?);
+            }
 
-            let tx = *t.at_2d::<f64>(0, 0)?;
-            let ty = *t.at_2d::<f64>(1, 0)?;
-            let tz = *t.at_2d::<f64>(2, 0)?;  // -1 if the camera is moving forward
-            let norm = (tx * tx + ty * ty + tz * tz).sqrt();
-            let tdir = if norm > 0.0 { Some(nalgebra::Unit::new_normalize(nalgebra::Vector3::new(tx, ty, tz))) } else { None };
-
-            Ok(RelativePose {
-                rotation: cv_to_na(r1)?,
-                transl_dir: tdir,
-                inlier_ratio: Some(inlier_ratio),
-                median_epi_err: None,
-            })
+            Ok(RelativePose { rotation, transl_dir, inlier_ratio, inlier_mask: Some(inlier_mask_vec) })
         }();
         #[cfg(not(feature = "use-opencv"))]
         let result = Err(());
 
         match result {
             Ok(res) => Some(res),
-            Err(_e) => None,
+            Err(e) => {
+                log::error!("OpenCV error: {:?}", e);
+                None
+            }
         }
     }
-}
-
-
-#[cfg(feature = "use-opencv")]
-fn cv_to_na(r1: Mat) -> Result<Rotation3<f64>, opencv::Error> {
-    if r1.typ() != opencv::core::CV_64FC1 {
-        return Err(opencv::Error::new(0, "Invalid matrix type".to_string()));
-    }
-    Ok(Rotation3::from_matrix_unchecked(nalgebra::Matrix3::new(
-        *r1.at_2d::<f64>(0, 0)?, *r1.at_2d::<f64>(0, 1)?, *r1.at_2d::<f64>(0, 2)?,
-        *r1.at_2d::<f64>(1, 0)?, *r1.at_2d::<f64>(1, 1)?, *r1.at_2d::<f64>(1, 2)?,
-        *r1.at_2d::<f64>(2, 0)?, *r1.at_2d::<f64>(2, 1)?, *r1.at_2d::<f64>(2, 2)?
-    )))
 }

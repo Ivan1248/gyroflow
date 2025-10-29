@@ -81,6 +81,7 @@ void draw_pixel(inout vec4 out_pix, float x, float y, bool isInput) {
     int width = max(params.width, params.output_width);
     int height = max(params.height, params.output_height);
 
+    // TODO: why ceil?
     int data = int(ceil(texture(texCanvas, vec2(x / width, y / height)).r * 255.0));
     if (data > 0) {
         int color = (data & 0xF8) >> 3;
