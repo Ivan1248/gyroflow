@@ -613,13 +613,10 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                     }
                 }
 
-                // Trigger motion estimation if requested, or when motion direction alignment is enabled via preset and vectors are missing
+                // Trigger motion estimation if requested, or when motion direction alignment is enabled via preset
                 {
                     let stab = queue.get_stab_for_job(*job_id).unwrap();
-                    let motion_dir_enabled = stab.smoothing.read()
-                        .get_motion_direction_status_json()
-                        .as_array()
-                        .map_or(false, |arr| !arr.is_empty());
+                    let motion_dir_enabled = stab.get_motion_direction_enabled();
 
                     if opts.estimate_motion || motion_dir_enabled || opts.report_motion.is_some() {
                         log::info!("[{:08x}] Estimating motion from video...", job_id);

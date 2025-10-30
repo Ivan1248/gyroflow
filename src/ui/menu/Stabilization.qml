@@ -92,7 +92,7 @@ MenuItem {
                 additionalTranslationZ.value = stab.additional_translation[2];
             }
             if (stab.hasOwnProperty("max_zoom") && +stab.max_zoom > 50) maxZoomSlider.value = +stab.max_zoom;
-            if (stab.hasOwnProperty("max_zoom_terations") && +stab.max_zoom_terations > 0) maxZoomIterations.value = +stab.max_zoom_terations;
+            if (stab.hasOwnProperty("max_zoom_iterations") && +stab.max_zoom_iterations > 0) maxZoomIterations.value = +stab.max_zoom_iterations;
             if (stab.hasOwnProperty("adaptive_zoom_method")) zoomingMethod.currentIndex = +stab.adaptive_zoom_method;
             if (stab.hasOwnProperty("use_gravity_vectors")) {
                 useGravityVectors.checked = !!stab.use_gravity_vectors;
@@ -109,18 +109,17 @@ MenuItem {
             Qt.callLater(updateHorizonLock);
 
             // Load motion direction alignment settings
-            const motionDirEnabled = stab.hasOwnProperty("motion_direction_enabled") ? !!stab.motion_direction_enabled : 
-                                     (stab.hasOwnProperty("motion_direction_params") && stab.motion_direction_params.length > 0); // Backward compat
-            const motionDirParams = stab.hasOwnProperty("motion_direction_params") ? stab.motion_direction_params : [];
-            
-            controller.load_motion_direction_params(JSON.stringify(motionDirParams), motionDirEnabled);
-            motionDirCb.cb.checked = motionDirEnabled;
-            
-            // Update UI with loaded parameters
-            for (const param of motionDirParams) {
-                if (param.name === "min_inlier_ratio") mdMinInlier.value = param.value;
-                else if (param.name === "max_epi_err") mdMaxErr.value = param.value;
-                else if (param.name === "flip_backward_dir") mdFlipBackward.checked = param.value > 0.5;
+            if (stab.hasOwnProperty("motion_direction_enabled")) {
+                const enabled = !!stab.motion_direction_enabled;
+                controller.set_motion_direction_enabled(enabled);
+                motionDirCb.cb.checked = enabled;
+            }
+            if (stab.hasOwnProperty("motion_direction_params") && stab.motion_direction_params.length > 0) {
+                for (const param of stab.motion_direction_params) {
+                    controller.set_motion_direction_param(param.name, param.value);
+                    if (param.name === "min_inlier_ratio") mdMinInlier.value = param.value;
+                    else if (param.name === "flip_backward_dir") mdFlipBackward.checked = param.value > 0.5;
+                }
             }
 
             if (stab.hasOwnProperty("video_speed")) videoSpeed.value = +stab.video_speed;
@@ -453,14 +452,28 @@ MenuItem {
         }
     }
 
+    function initializeMotionDirectionControls() {
+        const params = controller.get_motion_direction_params();
+        for (const param of params) {
+            if (param.name === "min_inlier_ratio") {
+                mdMinInlier.value = param.value;
+            } else if (param.name === "flip_backward_dir") {
+                mdFlipBackward.checked = param.value > 0.5;
+            }
+        }
+    }
+
     CheckBoxWithContent {
         id: motionDirCb;
         text: qsTr("Motion direction alignment");
         cb.onCheckedChanged: {
-            controller.set_motion_direction_alignment(cb.checked);
-            // Auto-run motion estimation if enabled but no data available
-            if (cb.checked && !controller.has_motion_directions()) {
-                window.motionData.runMotionEstimation();
+            controller.set_motion_direction_enabled(cb.checked);
+            if (cb.checked) {
+                initializeMotionDirectionControls();
+                // Auto-run motion estimation if enabled but no data available
+                if (!controller.has_motion_directions()) {
+                    window.motionData.runMotionEstimation();
+                }
             }
         }
 
@@ -471,69 +484,59 @@ MenuItem {
             visible: motionDirCb.cb.checked;
 
             Label {
-                text: qsTr("Min inlier ratio");
+                text: qsTr("Min. inlier ratio");
                 SliderWithField {
                     id: mdMinInlier;
-                    from: 0.0; to: 1.0; value: 0.2; precision: 3;
+                    from: 0.0; to: 1.0; precision: 2; defaultValue: 0.5;  // TODO: use controller as source of truth
                     width: parent.width;
                     onValueChanged: controller.set_motion_direction_param("min_inlier_ratio", value);
                 }
             }
-            Label {
-                text: qsTr("Max epipolar error");
-                SliderWithField {
-                    id: mdMaxErr;
-                    from: 0.0; to: 5.0; value: 2.0; precision: 3;
-                    width: parent.width;
-                    onValueChanged: controller.set_motion_direction_param("max_epi_err", value);
+            // Status messages
+            Column {
+                id: mdStatus
+                width: parent.width;
+                spacing: 2 * dpiScale;
+                visible: motionDirCb.cb.checked;
+                function refresh() {
+                    const status = controller.get_motion_direction_status();
+                    for (let i = children.length; i > 0; --i) children[i - 1].destroy();
+
+                    if (status.length > 0) {
+                        let qml = "import QtQuick; import '../components/'; Column { width: parent.width; ";
+                        for (const x of status) {
+                            switch (x.type) {
+                                case 'Label': {
+                                    let text = qsTranslate("Stabilization", x.text).replace(/\n/g, "<br>");
+                                    if (x.text_args) {
+                                        for (const arg of x.text_args) text = text.arg(arg);
+                                    }
+                                    qml += `BasicText { width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.StyledText; text: "${text}" }`;
+                                    break;
+                                }
+                                case 'QML':
+                                    qml += x.custom_qml;
+                                    break;
+                            }
+                        }
+                        qml += "}";
+                        Qt.createQmlObject(qml, mdStatus);
+                    }
+                }
+                Connections {
+                    target: controller;
+                    // TODO: improve triggers and conditions
+                    function onCompute_progress(id, progress) { if (progress >= 0.0) { mdStatus.refresh(); } }
                 }
             }
             CheckBox {
                 id: mdFlipBackward;
                 text: qsTr("Flip backward direction");
-                checked: false;
                 onCheckedChanged: controller.set_motion_direction_param("flip_backward_dir", checked ? 1.0 : 0.0);
             }
         }
-
-        // Status messages
-        Column {
-            id: mdStatus
-            width: parent.width;
-            spacing: 2 * dpiScale;
-            visible: motionDirCb.cb.checked;
-            function refresh() {
-                const status = controller.get_motion_direction_status();
-                for (let i = children.length; i > 0; --i) children[i - 1].destroy();
-
-                if (status.length > 0) {
-                    let qml = "import QtQuick; import '../components/'; Column { width: parent.width; ";
-                    for (const x of status) {
-                        switch (x.type) {
-                            case 'Label': {
-                                let text = qsTranslate("Stabilization", x.text).replace(/\n/g, "<br>");
-                                if (x.text_args) {
-                                    for (const arg of x.text_args) text = text.arg(arg);
-                                }
-                                qml += `BasicText { width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.StyledText; text: "${text}" }`;
-                                break;
-                            }
-                            case 'QML':
-                                qml += x.custom_qml;
-                                break;
-                        }
-                    }
-                    qml += "}";
-                    Qt.createQmlObject(qml, mdStatus);
-                }
-            }
-            Connections {
-                target: controller;
-                // TODO: improve triggers and conditions
-                function onCompute_progress(id, progress) { if (progress >= 0.0) { mdStatus.refresh(); } }
-            }
-        }
     }
+
 
     InfoMessageSmall {
         id: maxValues;

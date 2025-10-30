@@ -234,8 +234,7 @@ MenuItem {
                 // If motion direction alignment is enabled, re-run motion estimation
                 // so translation direction aligns with the selected camera stream.
                 try {
-                    const status = controller.get_motion_direction_status();
-                    if (status && status.length > 0 && !controller.sync_in_progress) {
+                    if (controller.get_motion_direction_enabled() && !controller.sync_in_progress) {
                         window.motionData.runMotionEstimation();
                     }
                 } catch(e) { }

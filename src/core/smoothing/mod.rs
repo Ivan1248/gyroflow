@@ -45,7 +45,6 @@ impl Default for Algs {
             Box::new(self::fixed::Fixed::default()),
         ])
     }
-
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -56,7 +55,7 @@ pub struct Smoothing {
 
     pub horizon_lock: horizon::HorizonLock,
     #[serde(skip)]
-    pub motion_direction: Option<MotionDirectionAlignment>,
+    pub motion_direction: MotionDirectionAlignment,
 }
 unsafe impl Send for Smoothing { }
 unsafe impl Sync for Smoothing { }
@@ -69,7 +68,7 @@ impl Default for Smoothing {
             current_id: 1,
 
             horizon_lock: horizon::HorizonLock::default(),
-            motion_direction: None,
+            motion_direction: MotionDirectionAlignment::default(),
         }
     }
 }
@@ -79,7 +78,7 @@ impl Clone for Smoothing {
         let mut ret = Self::default();
         ret.current_id = self.current_id;
         ret.horizon_lock = self.horizon_lock.clone();
-        ret.motion_direction = if let Some(md) = &self.motion_direction { Some(md.clone()) } else { None };
+        ret.motion_direction = self.motion_direction.clone();
 
         let parameters = self.current().get_parameters_json();
         if let serde_json::Value::Array(ref arr) = parameters {
@@ -117,8 +116,7 @@ impl Smoothing {
         hasher.write_usize(self.current_id);
         hasher.write_u64(self.algs.0[self.current_id].get_checksum());
         hasher.write_u64(self.horizon_lock.get_checksum());
-        hasher.write_u8(self.motion_direction.is_some() as u8);
-        if let Some(md) = &self.motion_direction { hasher.write_u64(md.get_checksum()); }
+        hasher.write_u64(self.motion_direction.get_checksum());
         hasher.finish()
     }
 
@@ -128,32 +126,13 @@ impl Smoothing {
 
     // Motion direction helpers (exposed to lib/controller)
     pub fn get_motion_direction_params_json(&self) -> serde_json::Value {
-        match &self.motion_direction { Some(md) => md.get_parameters_json(), None => serde_json::Value::Array(vec![]) }
+        self.motion_direction.get_parameters_json()
     }
     pub fn get_motion_direction_status_json(&self) -> serde_json::Value {
-        match &self.motion_direction { Some(md) => md.get_status_json(), None => serde_json::Value::Array(vec![]) }
+        self.motion_direction.get_status_json()
     }
     pub fn set_motion_direction_param(&mut self, name: &str, val: f64) {
-        if self.motion_direction.is_none() {
-            self.motion_direction = Some(MotionDirectionAlignment::default());
-        }
-        if let Some(md) = &mut self.motion_direction { md.set_parameter(name, val); }
-    }
-    pub fn load_motion_direction_from_params(&mut self, params_json: &serde_json::Value, enabled: bool) {
-        if enabled {
-            self.motion_direction = Some(MotionDirectionAlignment::default());
-            if let serde_json::Value::Array(arr) = params_json {
-                for param in arr {
-                    if let Some(obj) = param.as_object() {
-                        if let (Some(name), Some(value)) = (obj.get("name").and_then(|v| v.as_str()), obj.get("value").and_then(|v| v.as_f64())) {
-                            self.set_motion_direction_param(name, value);
-                        }
-                    }
-                }
-            }
-        } else {
-            self.motion_direction = None;
-        }
+        self.motion_direction.set_parameter(name, val);
     }
 }
 

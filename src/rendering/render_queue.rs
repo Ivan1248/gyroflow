@@ -953,10 +953,7 @@ impl RenderQueue {
                 // Check if motion direction alignment is enabled but motion vectors are missing
                 // This should not happen during rendering if motion estimation was done properly
                 if export_metadata.is_none() && export_stmap.is_none() {
-                    let motion_direction_enabled = stab.smoothing.read()
-                        .get_motion_direction_status_json()
-                        .as_array()
-                        .map_or(false, |arr| !arr.is_empty());
+                    let motion_direction_enabled = stab.get_motion_direction_enabled();
                     if motion_direction_enabled && stab.pose_estimator.sync_results.read().is_empty() {
                         ::log::warn!("Motion direction alignment is enabled but no motion vectors found in memory. Running motion estimation for this job.");
                         // Use UI knobs: of_method, pose_method, every_nth_frame, processing_resolution via SyncParams::for_motion_estimation

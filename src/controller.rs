@@ -82,13 +82,16 @@ pub struct Controller {
     get_smoothing_status: qt_method!(fn(&self) -> QJsonArray),
     set_smoothing_param: qt_method!(fn(&self, name: QString, val: f64)),
 
-    set_motion_direction_alignment: qt_method!(fn(&self, enabled: bool)),
+    get_motion_direction_enabled: qt_method!(fn(&self) -> bool),
+    set_motion_direction_enabled: qt_method!(fn(&self, enabled: bool)),
+    get_motion_direction_params: qt_method!(fn(&self) -> QJsonArray),
     set_motion_direction_param: qt_method!(fn(&self, name: QString, val: f64)),
-    load_motion_direction_params: qt_method!(fn(&self, params_json: QString, enabled: bool)),
     get_motion_direction_status: qt_method!(fn(&self) -> QJsonArray),
+    
     set_horizon_lock: qt_method!(fn(&self, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64)),
     set_use_gravity_vectors: qt_method!(fn(&self, v: bool)),
     set_horizon_lock_integration_method: qt_method!(fn(&self, v: i32)),
+    
     set_preview_resolution: qt_method!(fn(&mut self, target_height: i32, player: QJSValue)),
     set_processing_resolution: qt_method!(fn(&mut self, target_height: i32)),
     set_background_color: qt_method!(fn(&self, color: QString, player: QJSValue)),
@@ -320,6 +323,7 @@ pub struct Controller {
     
     has_motion_directions: qt_method!(fn(&self) -> bool),
 
+    // GNSS
     load_gpx: qt_method!(fn(&self, url: QUrl)),
     export_synchronized_gpx: qt_method!(fn(&self, url: QUrl)),
     get_gpx_summary: qt_method!(fn(&self) -> QJsonObject),
@@ -1249,25 +1253,20 @@ impl Controller {
         self.chart_data_changed();
         self.request_recompute();
     }
-    fn set_motion_direction_alignment(&mut self, enabled: bool) {
-        self.stabilizer.set_motion_direction_alignment(enabled);
-        self.chart_data_changed();
-        self.request_recompute();
-    }
+    wrap_simple_method!(set_motion_direction_enabled, enabled: bool; recompute; chart_data_changed);
     fn set_motion_direction_param(&mut self, name: QString, val: f64) {
         self.stabilizer.set_motion_direction_param(&name.to_string(), val);
         self.chart_data_changed();
         self.request_recompute();
     }
-    fn load_motion_direction_params(&mut self, params_json: QString, enabled: bool) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&params_json.to_string()) {
-            self.stabilizer.load_motion_direction_params(&json, enabled);
-            self.chart_data_changed();
-            self.request_recompute();
-        }
+    fn get_motion_direction_params(&self) -> QJsonArray {
+        util::serde_json_to_qt_array(&self.stabilizer.get_motion_direction_params())
     }
     fn get_motion_direction_status(&self) -> QJsonArray {
         util::serde_json_to_qt_array(&self.stabilizer.get_motion_direction_status())
+    }
+    fn get_motion_direction_enabled(&self) -> bool {
+        self.stabilizer.get_motion_direction_enabled()
     }
     wrap_simple_method!(set_horizon_lock, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_use_gravity_vectors, v: bool; recompute; chart_data_changed);

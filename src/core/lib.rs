@@ -543,7 +543,7 @@ impl StabilizationManager {
                     let smoothing = self.smoothing.read();
                     let horizon_lock = smoothing.horizon_lock.clone();
 
-                    let (quats, max_angles) = self.gyro.read().recompute_smoothness(smoothing.current().as_ref(), horizon_lock, smoothing.motion_direction.as_ref(), &params);
+                    let (quats, max_angles) = self.gyro.read().recompute_smoothness(smoothing.current().as_ref(), horizon_lock, &smoothing.motion_direction, &params);
                     let mut gyro = self.gyro.write();
                     gyro.max_angles = max_angles;
                     gyro.smoothed_quaternions = quats;
@@ -571,7 +571,7 @@ impl StabilizationManager {
         let smoothing = self.smoothing.read();
         let horizon_lock = smoothing.horizon_lock.clone();
 
-        let (quats, max_angles) = self.gyro.read().recompute_smoothness(smoothing.current().as_ref(), horizon_lock, smoothing.motion_direction.as_ref(), &params);
+        let (quats, max_angles) = self.gyro.read().recompute_smoothness(smoothing.current().as_ref(), horizon_lock, &smoothing.motion_direction, &params);
         let mut gyro = self.gyro.write();
         gyro.max_angles = max_angles;
         gyro.smoothed_quaternions = quats;
@@ -625,7 +625,7 @@ impl StabilizationManager {
                     (lock.current().clone(), lock.horizon_lock.clone(), lock.motion_direction.clone())
                 };
 
-                let (quats, max_angles) = gyro.read().recompute_smoothness(smoothing.as_mut(), horizon_lock, motion_dir.as_ref(), &params);
+                let (quats, max_angles) = gyro.read().recompute_smoothness(smoothing.as_mut(), horizon_lock, &motion_dir, &params);
 
                 if current_compute_id.load(SeqCst) != compute_id { return cb((compute_id, true)); }
                 if gyro_checksum != gyro.read().get_checksum() { return cb((compute_id, true)); }
@@ -634,7 +634,7 @@ impl StabilizationManager {
                 lib_gyro.max_angles = max_angles;
                 lib_gyro.smoothed_quaternions = quats;
                 lib_gyro.smoothing_status = smoothing.get_status_json();
-                lib_gyro.motion_direction_status = if let Some(md) = motion_dir.as_ref() { md.get_status_json() } else { serde_json::Value::Array(vec![]) };
+                lib_gyro.motion_direction_status = motion_dir.get_status_json();
                 gyro_checksum = lib_gyro.get_checksum();
                 smoothing_changed = true;
             }
@@ -702,7 +702,7 @@ impl StabilizationManager {
                             let lock = smoothing.read();
                             (lock.current().clone(), lock.horizon_lock.clone(), lock.motion_direction.clone())
                         };
-                        let (quats, max_angles) = gyro.read().recompute_smoothness(smoothing.as_mut(), horizon_lock, motion_dir.as_ref(), &params);
+                        let (quats, max_angles) = gyro.read().recompute_smoothness(smoothing.as_mut(), horizon_lock, &motion_dir, &params);
 
                         if current_compute_id.load(SeqCst) != compute_id { return cb((compute_id, true)); }
 
@@ -711,7 +711,7 @@ impl StabilizationManager {
                             lib_gyro.max_angles = max_angles;
                             lib_gyro.smoothed_quaternions = quats;
                             lib_gyro.smoothing_status = smoothing.get_status_json();
-                            lib_gyro.motion_direction_status = if let Some(md) = motion_dir.as_ref() { md.get_status_json() } else { serde_json::Value::Array(vec![]) };
+                            lib_gyro.motion_direction_status = motion_dir.get_status_json();
                         }
 
                         // Zooming
@@ -1261,22 +1261,22 @@ impl StabilizationManager {
         self.smoothing.read().get_names()
     }
 
-    pub fn set_motion_direction_alignment(&self, enabled: bool) {
-        let mut s = self.smoothing.write();
-        s.motion_direction = if enabled { Some(crate::smoothing::MotionDirectionAlignment::default()) } else { None };
-        drop(s);
+    pub fn set_motion_direction_enabled(&self, enabled: bool) {
+        self.smoothing.write().motion_direction.enabled = enabled;
         self.invalidate_smoothing();
     }
     pub fn set_motion_direction_param(&self, name: &str, val: f64) {
         self.smoothing.write().set_motion_direction_param(name, val);
         self.invalidate_smoothing();
     }
-    pub fn load_motion_direction_params(&self, params_json: &serde_json::Value, enabled: bool) {
-        self.smoothing.write().load_motion_direction_from_params(params_json, enabled);
-        self.invalidate_smoothing();
+    pub fn get_motion_direction_params(&self) -> serde_json::Value {
+        self.smoothing.read().get_motion_direction_params_json()
     }
     pub fn get_motion_direction_status(&self) -> serde_json::Value {
         self.gyro.read().motion_direction_status.clone()
+    }
+    pub fn get_motion_direction_enabled(&self) -> bool {
+        self.smoothing.read().motion_direction.enabled
     }
 
     pub fn get_cloned(&self) -> StabilizationManager {
@@ -1390,7 +1390,7 @@ impl StabilizationManager {
                 horizon_amount = 0.0;
             }
 
-            (smoothing.get_name(), parameters, horizon_amount, smoothing_lock.horizon_lock.clone(), smoothing_lock.get_motion_direction_params_json(), smoothing_lock.motion_direction.is_some())
+            (smoothing.get_name(), parameters, horizon_amount, smoothing_lock.horizon_lock.clone(), smoothing_lock.get_motion_direction_params_json(), smoothing_lock.motion_direction.enabled)
         };
 
         let input_file = self.input_file.read().clone();
@@ -1823,8 +1823,16 @@ impl StabilizationManager {
                 if let Some(motion_direction_enabled) = obj.get("motion_direction_enabled").and_then(|x| x.as_bool()) {
                     let default_params = serde_json::Value::Array(vec![]);
                     let motion_direction_params = obj.get("motion_direction_params").unwrap_or(&default_params);
-                    // Use the currently-held `smoothing` write guard to avoid deadlock
-                    smoothing.load_motion_direction_from_params(motion_direction_params, motion_direction_enabled);
+                    smoothing.motion_direction.enabled = motion_direction_enabled;
+                    if let serde_json::Value::Array(arr) = motion_direction_params {
+                        for param in arr {
+                            if let Some(obj) = param.as_object() {
+                                if let (Some(name), Some(value)) = (obj.get("name").and_then(|v| v.as_str()), obj.get("value").and_then(|v| v.as_f64())) {
+                                    smoothing.set_motion_direction_param(name, value);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if let Some(horizon_amount) = obj.get("horizon_lock_amount").and_then(|x| x.as_f64()) {

@@ -165,8 +165,7 @@ MenuItem {
             // Auto-run motion estimation after loading a new main video when motion direction alignment is enabled
             if (is_main_video) {
                 try {
-                    const status = controller.get_motion_direction_status();
-                    if (status && status.length > 0 && window.videoArea.vid.loaded && !controller.sync_in_progress) {
+                    if (controller.get_motion_direction_enabled() && !controller.has_motion_directions() && window.videoArea.vid.loaded && !controller.sync_in_progress) {
                         Qt.callLater(() => root.runMotionEstimation());
                     }
                 } catch (e) { }
