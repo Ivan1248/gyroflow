@@ -126,7 +126,7 @@ struct Opts {
     #[argh(option)]
     export_gpx: Option<String>,
 
-    /// create GPS synchronization report file at specified path; contains offset, similarity, and correlation information (requires --export-gpx)
+    /// create GPS synchronization report file at specified path; contains offset, error, and correlation information (requires --export-gpx)
     #[argh(option)]
     report_gps: Option<String>,
 
@@ -407,7 +407,7 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                         let sync_result = gps.sync_result.as_ref();
                                         // Report effective offset matching GUI (gps.offset_ms), not raw result.time_offset_s
                                         let offset_s = gps.offset_ms / 1000.0;
-                                        let similarity = sync_result.map(|r| r.similarity).unwrap_or(0.0);
+                                        let error = sync_result.map(|r| r.error).unwrap_or(0.0);
                                         let correlation = sync_result.map(|r| r.correlation).unwrap_or(0.0);
                                         let course_range_deg = sync_result.map(|r| r.course_range_deg).unwrap_or(0.0);
                                         let median_speed = gps.track.as_ref().map(
@@ -416,7 +416,7 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                                         if std::path::Path::new(&report_path).exists() && !opts.overwrite {
                                             log::error!("[{:08x}] GPS report file {} already exists. Use --overwrite to overwrite it.", job_id, report_path);
                                         } else {
-                                            match std::fs::write(&report_path, format!("offset: {}\nsimilarity: {}\ncorrelation: {}\ncourse_range_deg: {}\nmedian_speed: {}\n", offset_s, similarity, correlation, course_range_deg, median_speed)) {
+                                            match std::fs::write(&report_path, format!("offset: {}\nerror: {}\ncorrelation: {}\ncourse_range_deg: {}\nmedian_speed: {}\n", offset_s, error, correlation, course_range_deg, median_speed)) {
                                                 Ok(_) => log::info!("[{:08x}] GPS report saved to: {}", job_id, report_path),
                                                 Err(e) => log::error!("[{:08x}] Failed to save GPS report: {}", job_id, e),
                                             }

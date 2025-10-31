@@ -3,6 +3,7 @@
 
 use super::processing::unwrap_angles_deg;
 use crate::gyro_source::GyroSource;
+use crate::util::median;
 
 /// Macro to validate that all arrays have equal lengths
 /// Usage: assert_equal_lengths!(array1, array2, Some(mask));
@@ -36,12 +37,27 @@ pub const DEFAULT_MAX_TIME_OFFSET_S: f64 = 6.0;
 pub const DEFAULT_SAMPLE_RATE: f64 = 10.0;
 const MIN_NUM_SYNC_SAMPLES: usize = 8;
 
+/// GPS synchronization method
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GpsSyncMethod {
+    L1,  // L1 distance method
+    MedL2,  // Median L2 distance method
+    TrimmedL2,  // Trimmed L2 distance method (uses 90% of shortest squared distances)
+}
+
+impl Default for GpsSyncMethod {
+    fn default() -> Self {
+        Self::L1
+    }
+}
+
 /// GPS synchronization settings
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct GpsSyncSettings {
     pub speed_threshold: f64,  // m/s
     pub time_offset_range_s: (f64, f64),  // (min_offset_s, max_offset_s) in seconds
     pub sample_rate: f64,  // Hz
+    pub method: GpsSyncMethod,  // synchronization method
 }
 
 impl Default for GpsSyncSettings {
@@ -50,6 +66,7 @@ impl Default for GpsSyncSettings {
             speed_threshold: DEFAULT_SPEED_THRESHOLD, // m/s
             time_offset_range_s: (-DEFAULT_MAX_TIME_OFFSET_S, DEFAULT_MAX_TIME_OFFSET_S),
             sample_rate: DEFAULT_SAMPLE_RATE,
+            method: GpsSyncMethod::default(),
         }
     }
 }
@@ -61,7 +78,7 @@ pub struct GpsSyncResult {
     /// Positive: GPS is late (add time), negative: GPS is early (subtract time)
     pub time_offset_s: f64,
     pub valid_count: usize,   // number of samples used after masking
-    pub similarity: f64,  // RMS angular error in degrees
+    pub error: f64,  // RMS angular error in degrees
     pub correlation: f64,       // correlation coefficient from cross-correlation
     pub course_range_deg: f64,  // Range of course angles over valid points (degrees)
 }
@@ -155,16 +172,21 @@ pub fn synchronize_gps_gyro(
     }
 
     // Find time offset via cross-correlation (using mask)
-    let (offset, neg_l1_distance) = find_time_offset(
+    let error_fn = match settings.method {
+        GpsSyncMethod::L1 => l1_distance,
+        GpsSyncMethod::MedL2 => median_squared_error,
+        GpsSyncMethod::TrimmedL2 => trimmed_mse,
+    };
+    let (offset, error) = find_time_offset(
         &course_processed,
         &yaw_processed,
         mask.as_deref(),
         settings.sample_rate,
         settings.time_offset_range_s,
-        signal_neg_l1_distance,
+        error_fn,
     );
 
-    let correlation = compute_score(
+    let correlation = compute_error(
         &course_processed,
         &yaw_processed,
         mask.as_deref(),
@@ -178,7 +200,7 @@ pub fn synchronize_gps_gyro(
     Some(GpsSyncResult {
         time_offset_s: offset,
         valid_count: valid_count,
-        similarity: neg_l1_distance,
+        error,
         correlation: correlation,
         course_range_deg: course_range_deg,
     })
@@ -289,23 +311,52 @@ pub fn signal_pearson_correlation(
     covariance / (var_a.sqrt() * var_b.sqrt())
 }
 
-/// Compute negative L1 distance between two aligned signals with optional masking.
-/// Returns negative of the sum of absolute differences (higher values indicate more similarity).
-pub fn signal_neg_l1_distance(
+pub fn l1_distance(
     sig_a: &[f64],
     sig_b: &[f64],
     mask_a: Option<&[bool]>,
 ) -> f64 {
     let n = assert_equal_lengths!(sig_a, sig_b, mask_a);
     let mut l1_distance = 0.0;
-
     for i in 0..n {
         if mask_a.map_or(true, |m| m[i]) {
             l1_distance += (sig_a[i] - sig_b[i]).abs();
         }
     }
+    l1_distance / n as f64
+}
 
-    -l1_distance / n as f64
+fn squared_diffs(sig_a: &[f64], sig_b: &[f64], mask_a: Option<&[bool]>) -> Vec<f64> {
+    let n = assert_equal_lengths!(sig_a, sig_b, mask_a);
+    let mut squared_diffs: Vec<f64> = (0..n)
+        .filter(|&i| mask_a.map_or(true, |m| m[i]))
+        .map(|i| (sig_a[i] - sig_b[i]).powi(2))
+        .collect();
+    squared_diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    squared_diffs
+}
+
+pub fn median_squared_error(
+    sig_a: &[f64],
+    sig_b: &[f64],
+    mask_a: Option<&[bool]>,
+) -> f64 {
+    let squared_diffs = squared_diffs(sig_a, sig_b, mask_a);
+    if squared_diffs.is_empty() { 0.0 } else {median(squared_diffs)}
+}
+
+pub fn trimmed_mse(
+    sig_a: &[f64],
+    sig_b: &[f64],
+    mask_a: Option<&[bool]>,
+) -> f64 {
+    let squared_diffs = squared_diffs(sig_a, sig_b, mask_a);
+    if squared_diffs.is_empty() { 
+        return 0.0;
+    }
+    // Average 90% of the shortest distances
+    let used_count = (squared_diffs.len() as f64 * 0.9) as usize;
+    squared_diffs[..used_count].iter().sum::<f64>() 
 }
 
 /// Helper function to compute ranks with proper tie handling
@@ -339,7 +390,7 @@ fn find_time_offset<F>(
     mask_a: Option<&[bool]>,
     sample_rate: f64,
     time_offset_range_s: (f64, f64),
-    similarity_fn: F,
+    error_fn: F,
 ) -> (f64, f64)
 where
     F: Fn(&[f64], &[f64], Option<&[bool]>) -> f64,
@@ -347,7 +398,7 @@ where
     let n = assert_equal_lengths!(sig_a, sig_b, mask_a);
     let min_offset = (time_offset_range_s.0 * sample_rate).round() as isize;
     let max_offset = (time_offset_range_s.1 * sample_rate).round() as isize;
-    let mut best_correlation = f64::NEG_INFINITY;
+    let mut best_error = f64::INFINITY;
     let mut best_offset = 0isize;
 
     // Test all possible lags within the offset range
@@ -357,36 +408,35 @@ where
         if abs_offset >= n { continue; }
         let len = n - abs_offset;
 
-        let correlation = if offset >= 0 {
-            similarity_fn(&sig_a[..len], &sig_b[abs_offset..], mask_a.map(|m| &m[..len]))
+        let error = if offset >= 0 {
+            error_fn(&sig_a[..len], &sig_b[abs_offset..], mask_a.map(|m| &m[..len]))
         } else {
-            similarity_fn(&sig_a[abs_offset..], &sig_b[..len], mask_a.map(|m| &m[abs_offset..]))
+            error_fn(&sig_a[abs_offset..], &sig_b[..len], mask_a.map(|m| &m[abs_offset..]))
         };
-        // println!("offset: {:.3}, correlation: {:.3}", offset as f64 / sample_rate, correlation);
-        if correlation > best_correlation {
-            best_correlation = correlation;
+        if error < best_error || (error == best_error && offset.abs() < best_offset.abs()) {
+            best_error = error;
             best_offset = offset;
         }
     }
 
     // To align the signals, we need to shift signal_b forward by the offset
-    ((best_offset as f64) / sample_rate, best_correlation)
+    ((best_offset as f64) / sample_rate, best_error)
 }
 
-pub fn compute_score<F>(
+pub fn compute_error<F>(
     sig_a: &[f64],
     sig_b: &[f64],
     mask_a: Option<&[bool]>,
     sample_rate: f64,
     time_offset_s: f64,
-    score_fn: F
+    error_fn: F
 ) -> f64
 where
     F: Fn(&[f64], &[f64], Option<&[bool]>) -> f64,
 {
-    let (offset, score) = find_time_offset(sig_a, sig_b, mask_a, sample_rate, (time_offset_s, time_offset_s), score_fn);
+    let (offset, error) = find_time_offset(sig_a, sig_b, mask_a, sample_rate, (time_offset_s, time_offset_s), error_fn);
     assert_eq!(offset, time_offset_s);
-    score
+    -error
 }
 
 /// Refine time offset and estimate scale factor using optimization.

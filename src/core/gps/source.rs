@@ -261,7 +261,7 @@ impl GpsSource {
         signal_pearson_correlation(&course_processed, &yaw_processed, Some(&speed_mask))
     }
 
-    /// Update quality metrics (correlation, similarity, etc.) at the current offset
+    /// Update quality metrics (correlation, error, etc.) at the current offset
     pub fn update_metrics(&mut self, gyro: &GyroSource) {
         // Preserve the effective offset; we only want to recompute metrics, not change offset
         let original_offset_ms = self.offset_ms;

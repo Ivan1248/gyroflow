@@ -1831,14 +1831,6 @@ impl Controller {
         }
     }
     fn get_gps_info_text(&self) -> QString {
-        let sync_mode = self.stabilizer.get_gps_sync_mode();
-        let mode_str = match sync_mode {
-            0 => "Off",
-            1 => "Auto",
-            2 => "Manual",
-            _ => "Off",
-        };
-
         let anchor = self.stabilizer.get_gps_anchor();
         let overlap = self.stabilizer.get_gps_overlap();
         let offset_ms = self.stabilizer.get_gps_offset_ms();
@@ -1848,8 +1840,8 @@ impl Controller {
                               offset_s, anchor, overlap);
 
         if let Some(sync_result) = self.stabilizer.get_gps_sync_result() {
-            text.push_str(&format!(", correlation: {:.3}, L1 similarity: {:.3}",
-                                  sync_result.correlation, sync_result.similarity));
+            text.push_str(&format!(", correlation: {:.3}, error: {:.3}",
+                                  sync_result.correlation, sync_result.error));
         }
         if overlap <= 0.0 {
             text.push_str(" — No overlap; relative timeline");

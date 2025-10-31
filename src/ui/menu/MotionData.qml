@@ -747,6 +747,28 @@ MenuItem {
         width: parent.width;
         spacing: 6 * dpiScale;
         visible: controller.has_gps;
+        property var gpsSettingsCache: null;
+        function getGpsSettings() {
+            try {
+                gpsSettingsCache = JSON.parse(controller.get_gps_sync_settings());
+            } catch (e) {
+                gpsSettingsCache = {};
+            }
+            return gpsSettingsCache;
+        }
+        function withGpsSettings(mutator) {
+            const settings = getGpsSettings();
+            mutator(settings);
+            controller.set_gps_sync_settings(JSON.stringify(settings));
+        }
+        function refreshGpsUI() {
+            const settings = getGpsSettings();
+            if (gpsSyncMethod) gpsSyncMethod.currentIndex = gpsSyncMethod.methodIndex(settings.method);
+            if (gpsSpeedThreshold !== undefined) gpsSpeedThreshold.value = settings.speed_threshold;
+            if (gpsMaxTimeOffset && settings.time_offset_range_s)
+                gpsMaxTimeOffset.value = Math.max(settings.time_offset_range_s[1], -settings.time_offset_range_s[0]);
+        }
+        Component.onCompleted: refreshGpsUI()
 
         Label {
             position: Label.LeftPosition;
@@ -770,8 +792,38 @@ MenuItem {
             text: qsTr("Use processed motion for sync");
             visible: gpsSyncMode.currentIndex > 0; // Show for Auto and Manual modes
             checked: controller.gps_use_processed_motion;
-            tooltip: qsTr("Use motion data stabilization and smoothing aplied for GPS synchronization. Motion direction alignment can improve accuracy for head-mounted camera recordings.");
+            tooltip: qsTr("Use motion data stabilization and smoothing applied for GPS synchronization. Motion direction alignment can improve accuracy for head-mounted camera recordings.");
             onCheckedChanged: controller.gps_use_processed_motion = checked;
+        }
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("GPS sync method");
+            visible: gpsSyncMode.currentIndex > 0; // Show for Auto and Manual modes
+
+            ComboBox {
+                id: gpsSyncMethod;
+                visible: gpsSyncMode.currentIndex > 0; // Show for Auto and Manual modes
+                // Centralized options to avoid hardcoded indices/strings in multiple places
+                property var methodOptions: [
+                    { label: qsTr("L1"),          value: "L1" },
+                    { label: qsTr("Median L2"),   value: "MedL2" },
+                    { label: qsTr("Trimmed L2"),  value: "TrimmedL2" }
+                ]
+                function methodIndex(value) {
+                    for (var i = 0; i < methodOptions.length; i++)
+                        if (methodOptions[i].value === value)
+                            return i;
+                    return 0;
+                }
+                function methodValue(index) { 
+                    return methodOptions[Math.max(0, Math.min(index, methodOptions.length - 1))].value; 
+                }
+                model: methodOptions.map(function(opt) { return opt.label; });
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                tooltip: qsTr("Synchronization method: L1 uses the average absolute difference, Median L2 is more robust to outliers, Trimmed L2 uses the average of 90% of shortest squared distances.");
+                onCurrentIndexChanged: gpsSection.withGpsSettings(s => s.method = methodValue(currentIndex))
+            }
         }
         Label {
             position: Label.LeftPosition;
@@ -785,25 +837,9 @@ MenuItem {
                 precision: 1;
                 from: 0.1;
                 to: 10.0;
-                value: {
-                    try {
-                        const settings = JSON.parse(controller.get_gps_sync_settings());
-                        return settings.speed_threshold;
-                    } catch(e) {
-                        console.log("Error parsing GPS sync settings for speed threshold:", e);
-                    }
-                }
                 width: parent.width;
                 tooltip: qsTr("Speed threshold for GPS masking. Regions with speed below this threshold will be shaded on the GPS chart, indicating unreliable GPS data.");
-                onValueChanged: {
-                    try {
-                        const settings = JSON.parse(controller.get_gps_sync_settings());
-                        settings.speed_threshold = value;
-                        controller.set_gps_sync_settings(JSON.stringify(settings));
-                    } catch(e) {
-                        console.log("Error updating GPS speed threshold:", e);
-                    }
-                }
+                onValueChanged: gpsSection.withGpsSettings(s => s.speed_threshold = value)
             }
         }
         Label {
@@ -818,37 +854,14 @@ MenuItem {
                 precision: 1;
                 from: 0.0;
                 to: 120.0;
-                value: {
-                    try {
-                        const settings = JSON.parse(controller.get_gps_sync_settings());
-                        return Math.max(settings.time_offset_range_s[1], -settings.time_offset_range_s[0]);
-                    } catch(e) {
-                        console.log("Error parsing GPS sync settings for max time offset:", e);
-                    }
-                }
                 width: parent.width;
                 tooltip: qsTr("Maximum time shift window for GPS/gyro synchronization search.");
-                onValueChanged: {
-                    try {
-                        const settings = JSON.parse(controller.get_gps_sync_settings());
-                        settings.time_offset_range_s = [-value, value];
-                        controller.set_gps_sync_settings(JSON.stringify(settings));
-                    } catch(e) {
-                        console.log("Error updating GPS max time offset:", e);
-                    }
-                }
-                Connections {
-                    target: controller;
-                    function onGps_changed() {
-                        try {
-                            const settings = JSON.parse(controller.get_gps_sync_settings());
-                            gpsMaxTimeOffset.value = Math.max(settings.time_offset_range_s[1], -settings.time_offset_range_s[0]);
-                        } catch(e) {
-                            console.log("Error parsing GPS sync settings in Connections:", e);
-                        }
-                    }
-                }
+                onValueChanged: gpsSection.withGpsSettings(s => s.time_offset_range_s = [-value, value])
             }
+        }
+        Connections {
+            target: controller;
+            function onGps_changed() { gpsSection.refreshGpsUI(); }
         }
         Label {
             visible: gpsSyncMode.currentIndex === 2;

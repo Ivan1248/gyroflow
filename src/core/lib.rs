@@ -32,7 +32,7 @@ use keyframes::*;
 use parking_lot::{ RwLock, RwLockUpgradableReadGuard };
 use nalgebra::Vector4;
 use gyro_source::{ GyroSource, Quat64, TimeQuat, TimeVec };
-use gps::sync::{ GpsSyncSettings, GpsSyncResult };
+use gps::sync::{ GpsSyncSettings, GpsSyncResult, GpsSyncMethod };
 use stabilization_params::{ ReadoutDirection, StabilizationParams };
 use lens_profile::LensProfile;
 use lens_profile_database::LensProfileDatabase;

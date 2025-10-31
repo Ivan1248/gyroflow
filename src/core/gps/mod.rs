@@ -24,6 +24,7 @@ pub use sync::{
     sample_gyro_yaw_at_times,
     GpsSyncSettings,
     GpsSyncResult,
+    GpsSyncMethod,
     DEFAULT_MAX_TIME_OFFSET_S,
     DEFAULT_SAMPLE_RATE,
 };
