@@ -179,6 +179,10 @@ Rectangle {
             ItemLoader { id: motionData; sourceComponent: Component {
                 Menu.MotionData { }
             } }
+            Hr { id: motionDataHr; }
+            ItemLoader { id: gps; sourceComponent: Component {
+                Menu.GPS { }
+            } }
         }
 
         Column {
