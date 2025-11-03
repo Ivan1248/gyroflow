@@ -53,7 +53,10 @@ Our videos have been recorded with head-mounted omnidirectional cameras. They co
     "smoothing_params": [{"name": "time_constant", "value": 1.0}],
     "horizon_lock_amount": 100.0,
     "motion_direction_enabled": true,
-    "motion_direction_params": [{"name": "flip_backward_dir", "value": false}]
+    "motion_direction_params": [
+      {"name": "min_inlier_ratio", "value": 0.5},
+      {"name": "flip_backward_dir", "value": false}
+    ]
   },
   "output": {"width": 1280, "height": 920}
 }
@@ -183,7 +186,7 @@ This will:
 1. Load the GPX track file (`--input-gpx track.gpx`)
 2. Synchronize the GPS data using the processed motion direction and provided GPS settings
 3. Export the synchronized GPX file (`--export-gpx synchronized.gpx`)
-4. Create a GPS synchronization report with offset, similarity, correlation, and course range information (`--report-gps <path>`, requires `--export-gpx`)
+4. Create a GPS synchronization report with offset, error, correlation, and course range information (`--report-gps <path>`, requires `--export-gpx`)
 5. Use the first video stream (`--stream 0`)
 
 ### CLI Options Reference
@@ -201,7 +204,7 @@ This will:
 - `--input-gpx <file>`: Load GPX track file for synchronization
 - `--export-gpx <path>`: Export synchronized GPX file
 - `--gps-settings <json>`: GPS synchronization settings (sync_mode, use_processed_motion, speed_threshold, max_time_offset_s, sample_rate_hz)
-- `--report-gps <path>`: Generate GPS synchronization report with offset, similarity, correlation, and course range information
+- `--report-gps <path>`: Generate GPS synchronization report with offset, error, correlation, and course range information
 
 ## Batch processing scripts
 
@@ -291,7 +294,7 @@ python scripts/summarize.py output_directory [options]
 
 **Output files:**
 - `motion_summary.csv`: Motion analysis data (stream, avg_transl_dir, is_looking_forward)
-- `gps_summary.csv`: GPS synchronization data (offset, similarity, correlation, course_range_deg)
+- `gps_summary.csv`: GPS synchronization data (offset, error, correlation, course_range_deg)
 - `unified_summary.csv`: Combined motion and GPS data with correctness classification (when using `--unified`)
 
 **Example:**
@@ -305,7 +308,7 @@ python scripts/summarize.py ./output --unified --correctness-expr "correlation >
 
 **CSV format example:**
 ```csv
-video,offset,similarity,correlation,course_range_deg,correct
+video,offset,error,correlation,course_range_deg,correct
 session1/video1,0.8,0.811,0.809,45.2,true
 session2/video2,2.4,0.766,0.475,120.1,false
 ```
