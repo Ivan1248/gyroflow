@@ -678,9 +678,6 @@ Item {
                         fovChanged();
                         controller.update_keyframe_values(timestamp);
                         window.motionData.orientationIndicator.updateOrientation(timeline.position * timeline.durationMs * 1000);
-                        if (window.motionData.gpsMap && window.motionData.gpsMap.visible) {
-                            window.motionData.gpsMap.updatePosition(timeline.position * timeline.durationMs * 1000);
-                        }
                     }
                     onMetadataLoaded: (md) => {
                         Qt.callLater(fileLoaded, md);

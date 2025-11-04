@@ -118,3 +118,29 @@ pub fn save_gpx_file<P: AsRef<Path>>(path: P, time_offset: f64, track: &GpsTrack
     Ok(())
 }
 
+/// Save distance-based timestamps to CSV.
+///
+/// Each row contains: index (1-based), distance_m, time_ms, time_iso8601 (optional if `video_creation_time_s` provided).
+pub fn save_distance_timestamps_csv<P: AsRef<Path>>(path: P, step_m: f64, times_ms: &[f64], video_creation_time_s: Option<f64>) -> Result<(), crate::GyroflowCoreError> {
+    use std::io::Write;
+    use std::fs::File;
+    use chrono::{TimeZone, Utc};
+
+    if step_m <= 0.0 { return Ok(()); }
+
+    let mut file = File::create(path)?;
+    writeln!(file, "index,distance_m,time_ms,time_iso8601")?;
+    for (i, &tms) in times_ms.iter().enumerate() {
+        let idx = i + 1; // first mark is at 1*step
+        let dist = (idx as f64) * step_m;
+        if let Some(time_anchor) = video_creation_time_s {
+            let time_s = time_anchor + (tms / 1000.0);
+            let dt = Utc.timestamp_opt(time_s as i64, ((time_s.fract() * 1e9) as u32).min(999_999_999)).unwrap();
+            writeln!(file, "{},{:.6},{:.3},{}", idx, dist, tms, dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))?;
+        } else {
+            writeln!(file, "{},{:.6},{:.3},", idx, dist, tms)?;
+        }
+    }
+    Ok(())
+}
+

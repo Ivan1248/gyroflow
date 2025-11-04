@@ -12,7 +12,15 @@ MenuItem {
     iconName: "sync";
     objectName: "gps";
 
-    property alias gpsMap: gpsMap;
+    function showExportDialog(extension, exportDataType) {
+        const folder = filesystem.get_folder(window.videoArea.loadedFileUrl);
+        const base = filesystem.get_filename(controller.input_file_url);
+        const filename = filesystem.filename_with_extension(base, extension);
+        exportFileDialog.selectedFile = filesystem.get_file_url(folder, filename, false);
+        exportFileDialog.nameFilters = [extension.toUpperCase() + " (*." + extension + ")"];
+        exportFileDialog.exportData = exportDataType;
+        exportFileDialog.open2();
+    }
 
     Button {
         text: qsTr("Load GPX");
@@ -87,7 +95,21 @@ MenuItem {
             if (gpsMaxTimeOffset && settings.time_offset_range_s)
                 gpsMaxTimeOffset.value = Math.max(settings.time_offset_range_s[1], -settings.time_offset_range_s[0]);
         }
+        function getSafeNumberFieldValue(field, defaultValue) {
+            return (field && typeof field.value === 'number') ? field.value : defaultValue;
+        }
         Component.onCompleted: refreshGpsUI()
+
+        Connections {
+            target: controller;
+            function onGps_changed(): void {
+                gpsSyncMode.currentIndex = controller.gps_sync_mode;
+                gpsSection.refreshGpsUI();
+                gpsCoordsRow.refreshLatLon();
+                if (gpsMapCheckbox.checked)
+                    gpsMap.refreshMap();
+            }
+        }
 
         Label {
             position: Label.LeftPosition;
@@ -100,10 +122,6 @@ MenuItem {
                 width: parent.width;
                 Component.onCompleted: currentIndex = controller.gps_sync_mode;
                 onCurrentIndexChanged: controller.gps_sync_mode = currentIndex;
-                Connections {
-                    target: controller;
-                    function onGps_changed() { gpsSyncMode.currentIndex = controller.gps_sync_mode; }
-                }
             }
         }
         CheckBox {
@@ -178,10 +196,6 @@ MenuItem {
                 onValueChanged: gpsSection.withGpsSettings(s => s.time_offset_range_s = [-value, value])
             }
         }
-        Connections {
-            target: controller;
-            function onGps_changed() { gpsSection.refreshGpsUI(); }
-        }
         Label {
             visible: gpsSyncMode.currentIndex === 2;
             position: Label.LeftPosition;
@@ -215,14 +229,32 @@ MenuItem {
             text: qsTr("GPS map");
             onCheckedChanged: {
                 if (gpsMapCheckbox.checked) {
-                    gpsMap.refreshPolyline();
+                    gpsMap.refreshMap();
                     // Initialize coordinates and dot immediately when map is shown
-                    const ts = gpsCoordsRow.currentTimestampUs();
-                    gpsCoordsRow.refreshLatLon(ts);
-                    gpsMap.updatePosition(ts);
+                    gpsCoordsRow.updatePositionAndCoords();
                 }
                 Qt.callLater(gpsMap.requestPaint);
             }
+        }
+        CheckBoxWithContent {
+            id: gpsDistanceMarksCheckbox;
+            visible: gpsMapCheckbox.checked;
+            text: qsTr("Distance marks");
+            Row {
+                spacing: 6 * dpiScale;
+                BasicText { text: qsTr("Step"); }
+                NumberField {
+                    id: gpsDistanceStep;
+                    unit: "m";
+                    precision: 1;
+                    from: 1.0;
+                    to: 1000.0;
+                    width: Math.max(120 * dpiScale, root.width - 400 * dpiScale);
+                    value: 10.0;
+                    onValueChanged: if (gpsDistanceMarksCheckbox.checked) gpsMap.refreshDistanceMarks();
+                }
+            }
+            onCheckedChanged: if (gpsMapCheckbox.checked) gpsMap.refreshDistanceMarks();
         }
         Row {
             id: gpsCoordsRow;
@@ -243,6 +275,11 @@ MenuItem {
 			function refreshLatLon(ts) {
 				const t = (typeof ts === 'number') ? ts : currentTimestampUs();
 				gpsCoordsRow.lastLatLon = controller.get_gps_current_latlon(t);
+			}
+			function updatePositionAndCoords(ts) {
+				const timestamp = ts !== undefined ? ts : currentTimestampUs();
+				refreshLatLon(timestamp);
+				if (gpsMapCheckbox.checked) gpsMap.updatePosition(timestamp);
 			}
             BasicText {
                 id: gpsLatLonText;
@@ -268,19 +305,9 @@ MenuItem {
                 }
             }
 			Connections {
-				target: window.videoArea && window.videoArea.vid ? window.videoArea.vid : null;
-				function onTimestampUsChanged() {
-					const ts = Math.round((window.videoArea && window.videoArea.vid && window.videoArea.vid.timestampUs) || 0);
-					gpsCoordsRow.refreshLatLon(ts);
-				}
-				function onCurrentFrameChanged() {
-					gpsCoordsRow.refreshLatLon();
-				}
-			}
-			Connections {
-				target: controller;
-				function onGps_changed(): void {
-					gpsCoordsRow.refreshLatLon();
+				target: window.videoArea && window.videoArea.timeline ? window.videoArea.timeline : null;
+				function onPositionChanged() {
+					gpsCoordsRow.updatePositionAndCoords();
 				}
 			}
         }
@@ -290,24 +317,27 @@ MenuItem {
             height: parent.width * 0.75
             visible: gpsMapCheckbox.checked
             property var poly: []
-            property var cur: []
+            property var currPos: []
+            property var marks: []
 
             function refreshPolyline(): void {
-                poly = controller.get_gps_polyline(300);
+                poly = controller.get_gps_trajectory_for_map(300);
                 requestPaint();
             }
             function updatePosition(timestamp: real): void {
-                cur = controller.get_gps_current_xy(Math.round(timestamp));
+                currPos = controller.get_gps_current_pos_for_map(Math.round(timestamp));
                 requestPaint();
             }
-
-            Connections {
-                target: controller;
-                function onGps_changed(): void {
-                    if (gpsMapCheckbox.checked) {
-                        gpsMap.refreshPolyline();
-                    }
-                }
+            function refreshDistanceMarks(): void {
+                if (!gpsDistanceMarksCheckbox.checked) { marks = []; requestPaint(); return; }
+                const step = gpsSection.getSafeNumberFieldValue(gpsDistanceStep, 10.0);
+                const thr = gpsSection.getSafeNumberFieldValue(gpsSpeedThreshold, 0.0);
+                marks = controller.get_gps_distance_marks_for_map(step, thr, 2000);
+                requestPaint();
+            }
+            function refreshMap(): void {
+                refreshPolyline();
+                if (gpsDistanceMarksCheckbox.checked) refreshDistanceMarks();
             }
 
             onPaint: {
@@ -331,8 +361,9 @@ MenuItem {
                 const vx = (width  - s * dx) / 2 - s * minx;
                 const vy = (height - s * dy) / 2 - s * miny;
 
+                const pathColor = style === "light" ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.5)"
                 if (poly && poly.length >= 2) {
-                    ctx.strokeStyle = style === "light" ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.5)";
+                    ctx.strokeStyle = pathColor;
                     ctx.lineWidth = 2;
                     ctx.beginPath();
                     for (let i = 0; i < poly.length; i++) {
@@ -343,14 +374,24 @@ MenuItem {
                     ctx.stroke();
                 }
 
-                if (cur && cur.length >= 2) {
-                    const x = s * cur[0] + vx;
-                    const y = s * cur[1] + vy;
+                if (marks && marks.length >= 1) {
                     ctx.fillStyle = styleAccentColor;
-                    ctx.beginPath(); ctx.arc(x, y, 3, 0, 2*Math.PI); ctx.fill();
+                    for (let i = 0; i < marks.length; i++) {
+                        const x = s * marks[i][0] + vx;
+                        const y = s * marks[i][1] + vy;
+                        ctx.beginPath(); ctx.arc(x, y, 3, 0, 2*Math.PI); ctx.fill();
+                    }
+                }
+
+                if (currPos && currPos.length >= 2) {
+                    const x = s * currPos[0] + vx;
+                    const y = s * currPos[1] + vy;
+                    ctx.strokeStyle = styleAccentColor;
+                    ctx.beginPath(); ctx.arc(x, y, 3, 0, 2*Math.PI); ctx.stroke();
+                    ctx.beginPath(); ctx.arc(x, y, 4, 0, 2*Math.PI); ctx.stroke();
                 }
             }
-            Component.onCompleted: refreshPolyline()
+            Component.onCompleted: { refreshPolyline(); if (gpsDistanceMarksCheckbox.checked) refreshDistanceMarks(); }
         }
         Connections {
             target: controller
@@ -361,40 +402,40 @@ MenuItem {
         }
     }
 
+    FileDialog {
+        id: exportFileDialog;
+        fileMode: FileDialog.SaveFile;
+        title: qsTr("Select file destination");
+        type: "gyro-csv";
+        property var exportData: ({});
+        onAccepted: {
+            if (exportData === "gpx") {
+                controller.export_synchronized_gpx(selectedFile);
+            } else if (exportData === "gps-distance-csv") {
+                const step = gpsSection.getSafeNumberFieldValue(gpsDistanceStep, 10.0);
+                const thr = gpsSection.getSafeNumberFieldValue(gpsSpeedThreshold, 0.0);
+                controller.export_gps_distance_timestamps(selectedFile, step, thr);
+            }
+        }
+    }
+
     Row {
         anchors.horizontalCenter: parent.horizontalCenter;
         LinkButton {
             id: exportGpsBtn;
             text: qsTr("Export");
-            onClicked: {
-                menuLoader.toggle(exportGpsBtn, 0, height);
-            }
+            onClicked: menuLoader.toggle(exportGpsBtn, 0, height);
             Component {
                 id: menu;
                 Menu {
                     id: menuInner;
-                    FileDialog {
-                        id: exportFileDialog;
-                        fileMode: FileDialog.SaveFile;
-                        title: qsTr("Select file destination");
-                        type: "gyro-csv";
-                        property var exportData: ({});
-                        onAccepted: {
-                            if (exportData === "gpx") {
-                                controller.export_synchronized_gpx(selectedFile);
-                            }
-                        }
-                    }
                     Action {
                         text: qsTr("Export synchronized GPX");
-                        onTriggered: {
-                            const folder = filesystem.get_folder(window.videoArea.loadedFileUrl);
-                            const filename = root.filename.replace(/\.[^/.]+$/, ".gpx");
-                            exportFileDialog.selectedFile = filesystem.get_file_url(folder, filename, false);
-                            exportFileDialog.nameFilters = ["GPX (*.gpx)"];
-                            exportFileDialog.exportData = "gpx";
-                            exportFileDialog.open2();
-                        }
+                        onTriggered: root.showExportDialog("gpx", "gpx");
+                    }
+                    Action {
+                        text: qsTr("Export distance timestamps (CSV)");
+                        onTriggered: root.showExportDialog("csv", "gps-distance-csv");
                     }
                 }
             }

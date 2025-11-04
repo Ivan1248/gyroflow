@@ -168,7 +168,8 @@ impl StabilizationManager {
     pub fn get_gps_use_processed_motion(&self) -> bool { self.gps.read().use_processed_motion }
     pub fn set_gps_use_processed_motion(&self, use_processed_motion: bool) { self.gps.write().use_processed_motion = use_processed_motion; }
     pub fn get_gps_sync_mode(&self) -> i32 {
-        match self.gps.read().sync_mode { crate::gps::source::GPSSyncMode::Off => 0, crate::gps::source::GPSSyncMode::Auto => 1, crate::gps::source::GPSSyncMode::Manual => 2 }
+        use crate::gps::source::GPSSyncMode as M;
+        match self.gps.read().sync_mode { M::Off => 0, M::Auto => 1, M::Manual => 2 }
     }
     pub fn set_gps_sync_mode(&self, mode: i32) {
         use crate::gps::source::GPSSyncMode as M;
@@ -213,6 +214,9 @@ impl StabilizationManager {
         self.gps.read().get_sync_result()
     }
     pub fn get_gps_track(&self) -> Option<crate::gps::GpsTrack> { self.gps.read().track.clone() }
+    pub fn compute_gps_distance_timestamps_ms(&self, step_m: f64, min_speed_mps: f64) -> Vec<f64> {
+        self.gps.read().compute_distance_timestamps_ms(self.gyro.read().duration_ms, step_m, min_speed_mps)
+    }
     
     pub fn init_from_video_data(&self, duration_ms: f64, fps: f64, frame_count: usize, video_size: (usize, usize)) {
         {

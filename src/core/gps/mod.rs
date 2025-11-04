@@ -9,14 +9,15 @@ pub mod sync;
 
 // Re-export commonly used types
 pub use data::{TrackPoint, GpsTrack};
-pub use io::{parse_gpx_from_str, parse_gpx_file, save_gpx_file};
+pub use io::{parse_gpx_from_str, parse_gpx_file, save_gpx_file, save_distance_timestamps_csv};
 pub use processing::{
-    haversine_distance_m, 
-    initial_bearing_deg, 
-    BearingConvention, 
+    haversine_distance_m,
+    initial_bearing_deg,
+    BearingConvention,
     latlon_to_enu,
     unwrap_angles_deg,
     resample_linear,
+    linear_interpolate_latlon,
 };
 pub use source::{GpsSource, GPSSyncMode, GPSAnchor, TimeAlignment, PreparedGpsData};
 pub use sync::{

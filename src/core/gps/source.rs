@@ -248,19 +248,6 @@ impl GpsSource {
         self.sync_result
     }
 
-    /// Compute correlation from prepared signals
-    fn compute_correlation_from_signals(&self, course_deg: &[f64], gyro_yaw_deg: &[f64], speed_mps: &[f64]) -> f64 {
-        // Preprocess signals exactly like synchronization does
-        let course_processed = preprocess_angular_signal(course_deg, self.sync_settings.sample_rate);
-        let yaw_processed = preprocess_angular_signal(gyro_yaw_deg, self.sync_settings.sample_rate);
-
-        // Create speed mask for correlation computation
-        let speed_mask: Vec<bool> = speed_mps.iter().map(|&speed| speed >= self.sync_settings.speed_threshold).collect();
-
-        // Compute correlation directly
-        signal_pearson_correlation(&course_processed, &yaw_processed, Some(&speed_mask))
-    }
-
     /// Update quality metrics (correlation, error, etc.) at the current offset
     pub fn update_metrics(&mut self, gyro: &GyroSource) {
         // Preserve the effective offset; we only want to recompute metrics, not change offset
@@ -290,6 +277,35 @@ impl GpsSource {
                 })
             }
         }
+    }
+    
+    /// Compute video-local timestamps (milliseconds) at multiples of `step_m` along the GPS path.
+    /// Skips segments where instantaneous segment speed is below `min_speed_mps` (> 0 to enable).
+    pub fn compute_distance_timestamps_ms(&self, duration_ms: f64, step_m: f64, min_speed: f64) -> Vec<f64> {
+        use super::processing::{compute_pruned_cumulative_distance, find_distance_crossings};
+
+        let track = match self.track.as_ref() { Some(t) => t, None => return vec![] };
+        if step_m <= 0.0 { return vec![]; }
+        let n = track.len();
+        if n < 2 { return vec![]; }
+
+        // Compute cumulative distance with low-speed pruning
+        let cum = compute_pruned_cumulative_distance(&track.time, &track.lat, &track.lon, min_speed);
+        if cum.is_empty() || cum[cum.len() - 1] < step_m { return vec![]; }
+
+        // Find crossing times in seconds (track time base: seconds since video creation time)
+        let crossing_times_s = find_distance_crossings(&cum, &track.time, step_m);
+        if crossing_times_s.is_empty() { return vec![]; }
+
+        // Convert to video-local milliseconds and clip to [0, video_duration]
+        let mut out_ms: Vec<f64> = crossing_times_s.into_iter()
+            .map(|t| self.offset_ms + t * 1000.0)
+            .filter(|&tms| tms >= 0.0 && tms <= duration_ms)
+            .collect();
+
+        // Ensure strict monotonicity and remove accidental duplicates from numeric issues
+        out_ms.dedup_by(|a, b| (*a - *b).abs() < 0.25); // treat <0.25ms as duplicates
+        out_ms
     }
 }
 
