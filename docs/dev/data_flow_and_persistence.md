@@ -151,7 +151,7 @@ The following tables list all settings visible in Gyroflow's GUI. Each includes 
 
 | Setting Key | Component | Description | Type | Default | Persistence | Source for default value | SoT copies | Priority Order |
 |-------------|-----------|-------------|------|---------|-------------|----------------|----------|----------------|
-| `processingResolution` | Motion Data | Motion estimation resolution | number | 3 | Application settings | Hardcoded in GUI | GUI:MotionData.qml:1294 | User settings → GUI defaults |
+| `processingResolution` | Motion Data | Motion estimation resolution | number | 3 | Application settings | Hardcoded in GUI | GUI:MotionData.qml:907 | User settings → GUI defaults |
 | `ofMethod` | Motion Data | Optical flow method | number | 2 | Lens sync_settings | Lens profile default | GUI:MotionData.qml:1316 | User settings → Lens profile → GUI defaults |
 | `poseMethod` | Motion Data | Pose estimation method | number | 0 | Lens sync_settings | Lens profile default | GUI:MotionData.qml:1337 | User settings → Lens profile → GUI defaults |
 | `everyNthFrame` | Motion Data | Process every Nth frame | number | 1 | Lens sync_settings | Lens profile default | GUI:MotionData.qml:1347 | User settings → Lens profile → GUI defaults |
@@ -159,42 +159,43 @@ The following tables list all settings visible in Gyroflow's GUI. Each includes 
 | `showOF` | Motion Data | Show optical flow | boolean | false | Application settings | Hardcoded in GUI | GUI:MotionData.qml:1371, core:stabilization_params.rs:135 | User settings → GUI defaults → core defaults |
 | `showMotionDirection` | Motion Data | Show motion direction | boolean | true | Application settings | Hardcoded in GUI | GUI:MotionData.qml:1381, core:lib.rs:106 | User settings → GUI defaults → core defaults |
 
-### GPS Synchronization Settings
+### GPS Settings
 
 | Setting Key | Component | Description | Type | Default | Persistence | Source for default value | SoT copies | Priority Order |
 |-------------|-----------|-------------|------|---------|-------------|----------------|----------|----------------|
-| `gps_sync_mode` | GPS | GPS sync mode (Off/Auto/Manual) | number | 0 | Project file | Hardcoded in GUI | GUI:GPS.qml:770, core:gps/mod.rs:17 | User settings → GUI defaults → core defaults |
+| `gps_sync_mode` | GPS | GPS sync mode (Off/Auto/Manual) | number | 0 | Project file | Hardcoded in GUI | GUI:GPS.qml:133, core:gps/mod.rs:12 | User settings → GUI defaults → core defaults |
 | `gps_use_processed_motion` | GPS | Use processed motion for GPS sync | boolean | false | Project file | Hardcoded in GUI | GUI:GPS.qml:782 | User settings → GUI defaults |
-| `gps_sync_settings` | GPS | GPS sync method and parameters | JSON | {} | Project file | Hardcoded in GUI | GUI:GPS.qml:751-759 | User settings → GUI defaults |
-| `gps_offset_ms` | GPS | Manual GPS offset in milliseconds | number | 0 | Project file | User input | GUI:GPS.qml:917, core:gps/mod.rs:22 | User settings → GUI defaults → core defaults |
+| `gps_sync_settings` | GPS | GPS sync method and parameters | JSON | {} | Project file | Hardcoded in GUI | GUI:GPS.qml:74-81 | User settings → GUI defaults |
+| `gps_offset_ms` | GPS | Manual GPS offset in milliseconds | number | 0 | Project file | User input | GUI:GPS.qml:233, core:gps/source.rs:155 | User settings → GUI defaults → core defaults |
+| `gps_sampling_settings` | GPS | GPS frame sampling method and parameters | JSON | {} | Project file | Hardcoded in GUI | GUI:GPS.qml:82-86 | User settings → GUI defaults |
 
 ### Synchronization Settings
 
 | Setting Key | Component | Description | Type | Default | Persistence | Source for default value | SoT copies | Priority Order |
 |-------------|-----------|-------------|------|---------|-------------|----------------|----------|----------------|
 | `initialOffset` | Synchronization | Initial sync offset | number | 0 | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:224 | User settings → GUI defaults |
-| `syncSearchSize` | Synchronization | Sync search window size | number | 5.0 | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:248, CLI:cli.rs:826 | CLI args → User settings → GUI defaults → CLI hardcoded (5) |
-| `maxSyncPoints` | Synchronization | Maximum sync points | number | 3 | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:272, CLI:cli.rs:828 | CLI args → User settings → GUI defaults → CLI hardcoded (5) |
-| `timePerSyncpoint` | Synchronization | Time per sync point | number | 1.5 | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:301, CLI:cli.rs:830 | CLI args → User settings → GUI defaults → CLI hardcoded (1) |
+| `syncSearchSize` | Synchronization | Sync search window size | number | 5.0 | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:248, CLI:cli.rs:946 | CLI args → User settings → GUI defaults → CLI hardcoded (5) |
+| `maxSyncPoints` | Synchronization | Maximum sync points | number | 3 | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:272, CLI:cli.rs:948 | CLI args → User settings → GUI defaults → CLI hardcoded (5) |
+| `timePerSyncpoint` | Synchronization | Time per sync point | number | 1.5 | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:301, CLI:cli.rs:950 | CLI args → User settings → GUI defaults → CLI hardcoded (1) |
 | `sync_lpf` | Synchronization | Sync low-pass filter | number | 0 | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:335 | User settings → GUI defaults |
 | `checkNegativeInitialOffset` | Synchronization | Allow negative initial offset | boolean | false | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:228 | User settings → GUI defaults |
-| `experimentalAutoSyncPoints` | Synchronization | Use experimental auto sync points | boolean | false | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:199, CLI:cli.rs:833 | CLI args → User settings → GUI defaults → CLI hardcoded (true) |
+| `experimentalAutoSyncPoints` | Synchronization | Use experimental auto sync points | boolean | false | Application settings | Hardcoded in GUI | GUI:Synchronization.qml:199, CLI:cli.rs:953 | CLI args → User settings → GUI defaults → CLI hardcoded (true) |
 
 ### Export Settings
 
 | Setting Key | Component | Description | Type | Default | Persistence | Source for default value | SoT copies | Priority Order |
 |-------------|-----------|-------------|------|---------|-------------|----------------|----------|----------------|
 | `defaultCodec` | Export | Default video codec | number | 1 | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:258, CLI | CLI args → User settings → GUI defaults → CLI mapping |
-| `exportAudio` | Export | Export audio track | boolean | true | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:507, CLI:cli.rs:810 | CLI args → User settings → GUI defaults → CLI hardcoded (true) |
-| `keyframeDistance` | Export | Keyframe distance | number | 1 | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:564, CLI:cli.rs:811 | CLI args → User settings → GUI defaults → CLI hardcoded (1) |
-| `preserveOtherTracks` | Export | Preserve other video tracks | boolean | false | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:573, CLI:cli.rs:812 | CLI args → User settings → GUI defaults → CLI hardcoded (false) |
-| `padWithBlack` | Export | Pad with black frames | boolean | false | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:580, CLI:cli.rs:813 | CLI args → User settings → GUI defaults → CLI hardcoded (false) |
-| `exportTrimsSeparately` | Export | Export trims as separate files | boolean | false | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:587, CLI:cli.rs:814 | CLI args → User settings → GUI defaults → CLI hardcoded (false) |
+| `exportAudio` | Export | Export audio track | boolean | true | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:507, CLI:cli.rs:930 | CLI args → User settings → GUI defaults → CLI hardcoded (true) |
+| `keyframeDistance` | Export | Keyframe distance | number | 1 | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:564, CLI:cli.rs:936 | CLI args → User settings → GUI defaults → CLI hardcoded (1) |
+| `preserveOtherTracks` | Export | Preserve other video tracks | boolean | false | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:573, CLI:cli.rs:937 | CLI args → User settings → GUI defaults → CLI hardcoded (false) |
+| `padWithBlack` | Export | Pad with black frames | boolean | false | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:580, CLI:cli.rs:938 | CLI args → User settings → GUI defaults → CLI hardcoded (false) |
+| `exportTrimsSeparately` | Export | Export trims as separate files | boolean | false | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:587, CLI:cli.rs:939 | CLI args → User settings → GUI defaults → CLI hardcoded (false) |
 | `useVulkanEncoder` | Export | Use Vulkan encoder | boolean | false | Application settings | Platform-specific default | GUI:menu/Export.qml:696 | User settings → Platform defaults → GUI defaults |
 | `useD3D12Encoder` | Export | Use D3D12 encoder | boolean | false | Application settings | Platform-specific default | GUI:menu/Export.qml:705 | User settings → Platform defaults → GUI defaults |
-| `metadataComment` | Export | Metadata comment | string | "" | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:552, CLI:cli.rs:815 | CLI args → User settings → GUI defaults → CLI empty string |
-| `audioCodec` | Export | Audio codec | number | 0 | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:600, CLI:cli.rs:820 | CLI args → User settings → GUI defaults → CLI mapping |
-| `interpolationMethod` | Export | Frame interpolation method | number | 2 | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:611, CLI:cli.rs:821 | CLI args → User settings → GUI defaults → CLI mapping |
+| `metadataComment` | Export | Metadata comment | string | "" | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:552, CLI:cli.rs:935 | CLI args → User settings → GUI defaults → CLI empty string |
+| `audioCodec` | Export | Audio codec | number | 0 | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:600, CLI:cli.rs:940 | CLI args → User settings → GUI defaults → CLI mapping |
+| `interpolationMethod` | Export | Frame interpolation method | number | 2 | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:611, CLI:cli.rs:941 | CLI args → User settings → GUI defaults → CLI mapping |
 | `preserveOutputSettings` | Export | Preserve output settings | boolean | false | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:670 | User settings → GUI defaults |
 | `preserveOutputPath` | Export | Preserve output path | boolean | false | Application settings | Hardcoded in GUI | GUI:menu/Export.qml:683 | User settings → GUI defaults |
 | `preservedWidth` | Export | Last used output width | number | 0 | Application settings | Last used value | GUI | User settings → GUI auto-save |
