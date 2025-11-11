@@ -162,7 +162,7 @@ impl StabilizationManager {
         gps.set_track(track);
     }
     pub fn get_gpx_summary(&self) -> serde_json::Value {
-        self.gps.read().summary_json(self.params.read().duration_ms)
+        self.gps.read().summary_json(self.params.read().duration_ms, self.params.read().video_created_at.unwrap_or(0) as f64)
     }
     pub fn clear_gps_data(&self) { self.gps.write().clear_data(); }
     pub fn get_gps_use_processed_motion(&self) -> bool { self.gps.read().use_processed_motion }
@@ -216,6 +216,16 @@ impl StabilizationManager {
     pub fn get_gps_track(&self) -> Option<crate::gps::GpsTrack> { self.gps.read().track.clone() }
     pub fn compute_gps_distance_timestamps_ms(&self, step_m: f64, min_speed_mps: f64) -> Vec<f64> {
         self.gps.read().compute_distance_timestamps_ms(self.gyro.read().duration_ms, step_m, min_speed_mps)
+    }
+    pub fn get_gps_sampling_settings(&self) -> crate::gps::GPSFrameSamplingSettings {
+        self.gps.read().get_sampling_settings()
+    }
+    pub fn set_gps_sampling_settings(&self, settings: crate::gps::GPSFrameSamplingSettings) {
+        self.gps.write().set_sampling_settings(settings);
+    }
+    pub fn compute_gps_frame_timestamps_from_sampling(&self) -> Vec<f64> {
+        let settings = self.gps.read().get_sampling_settings();
+        self.gps.read().compute_sampling_timestamps_ms(self.gyro.read().duration_ms, &settings)
     }
     
     pub fn init_from_video_data(&self, duration_ms: f64, fps: f64, frame_count: usize, video_size: (usize, usize)) {

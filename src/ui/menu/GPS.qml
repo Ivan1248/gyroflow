@@ -2,6 +2,7 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 import QtQuick
+import QtQuick.Controls as QQC
 import QtQuick.Dialogs
 
 import "../components/"
@@ -9,7 +10,7 @@ import "../components/"
 MenuItem {
     id: root;
     text: qsTr("GPS");
-    iconName: "sync";
+    iconName: "gps";
     objectName: "gps";
 
     function showExportDialog(extension, exportDataType) {
@@ -40,7 +41,8 @@ MenuItem {
         id: info;
 
         model: ({
-            "GPX status": "---"
+            "Created at": "---",
+            "Info": "---",
         })
     }
     Timer {
@@ -51,42 +53,37 @@ MenuItem {
         onTriggered: {
             const s = controller.get_gpx_summary();
             if (s && s.loaded) {
-                let msg = s.points + " pts";
-                if (s.start_time !== undefined && s.epoch_end_s !== undefined) {
-                    msg += ", " + new Date(s.start_time*1000).toISOString() + " → " + new Date(s.epoch_end_s*1000).toISOString();
-                }
-                if (s.overlap_ms !== undefined) {
-                    const ms = Math.round(s.overlap_ms);
-                    const mm = Math.floor(ms/60000);
-                    const ss = Math.floor((ms%60000)/1000);
-                    msg += ", overlap " + mm + ":" + ("0"+ss).slice(-2);
-                }
-                info.updateEntry("GPX status", msg);
+                const startTime = new Date(s.epoch_start_s * 1000).toLocaleString();
+                info.updateEntry("Created at", startTime);
+                const ms = Math.round(s.overlap_ms);
+                const mm = Math.floor(ms / 60000);
+                const ss = Math.floor((ms % 60000) / 1000);
+                info.updateEntry("Info", s.points + " points, overlap: " + mm + ":" + ("0" + ss).slice(-2));
             } else {
-                info.updateEntry("GPX status", "---");
+                info.updateEntry("Created at", "---");
+                info.updateEntry("Info", "---");
             }
         }
     }
 
     // GPS section (gated by has_gps())
     Column {
-        id: gpsSection;
+        id: gpsSettings;
         width: parent.width;
         spacing: 6 * dpiScale;
         visible: controller.has_gps;
-        property var gpsSettingsCache: null;
         function getGpsSettings() {
-            try {
-                gpsSettingsCache = JSON.parse(controller.get_gps_sync_settings());
-            } catch (e) {
-                gpsSettingsCache = {};
-            }
-            return gpsSettingsCache;
+            return controller.get_gps_sync_settings();
         }
         function withGpsSettings(mutator) {
             const settings = getGpsSettings();
             mutator(settings);
-            controller.set_gps_sync_settings(JSON.stringify(settings));
+            controller.set_gps_sync_settings(settings);
+        }
+        function withSamplingSettings(mutator) {
+            const settings = controller.get_gps_sampling_settings();
+            mutator(settings);
+            controller.set_gps_sampling_settings(settings);
         }
         function refreshGpsUI() {
             const settings = getGpsSettings();
@@ -94,9 +91,22 @@ MenuItem {
             if (gpsSpeedThreshold !== undefined) gpsSpeedThreshold.value = settings.speed_threshold;
             if (gpsMaxTimeOffset && settings.time_offset_range_s)
                 gpsMaxTimeOffset.value = Math.max(settings.time_offset_range_s[1], -settings.time_offset_range_s[0]);
-        }
-        function getSafeNumberFieldValue(field, defaultValue) {
-            return (field && typeof field.value === 'number') ? field.value : defaultValue;
+            
+            // Refresh sampling settings
+            const ss = controller.get_gps_sampling_settings();
+            if (ss.method.DistanceInterval) {
+                if (gpsSamplingMethod) gpsSamplingMethod.currentIndex = 0;
+                if (gpsDistanceStep) gpsDistanceStep.value = ss.method.DistanceInterval.step_m;
+                if (gpsMinSpeed) gpsMinSpeed.value = ss.method.DistanceInterval.min_speed;
+            } else if (ss.method.CoordinatesList) {
+                if (gpsSamplingMethod) gpsSamplingMethod.currentIndex = 1;
+                if (gpsCoordinatesList) {
+                    const coords = ss.method.CoordinatesList.coords || [];
+                    gpsCoordinatesList.text = coords.map(c => `${c[0]}, ${c[1]}`).join('\n');
+                }
+                // Refresh marks on map
+                Qt.callLater(function() { gpsMap.refreshMarks(); });
+            }
         }
         Component.onCompleted: refreshGpsUI()
 
@@ -104,7 +114,7 @@ MenuItem {
             target: controller;
             function onGps_changed(): void {
                 gpsSyncMode.currentIndex = controller.gps_sync_mode;
-                gpsSection.refreshGpsUI();
+                gpsSettings.refreshGpsUI();
                 gpsCoordsRow.refreshLatLon();
                 if (gpsMapCheckbox.checked)
                     gpsMap.refreshMap();
@@ -159,7 +169,7 @@ MenuItem {
                 font.pixelSize: 12 * dpiScale;
                 width: parent.width;
                 tooltip: qsTr("Synchronization method: L1 uses the average absolute difference, Median L2 is more robust to outliers, Trimmed L2 uses the average of 90% of shortest squared distances.");
-                onCurrentIndexChanged: gpsSection.withGpsSettings(s => s.method = methodValue(currentIndex))
+                onCurrentIndexChanged: gpsSettings.withGpsSettings(s => s.method = methodValue(currentIndex))
             }
         }
         Label {
@@ -176,7 +186,13 @@ MenuItem {
                 to: 10.0;
                 width: parent.width;
                 tooltip: qsTr("Speed threshold for GPS masking. Regions with speed below this threshold will be shaded on the GPS chart, indicating unreliable GPS data.");
-                onValueChanged: gpsSection.withGpsSettings(s => s.speed_threshold = value)
+                onValueChanged: {
+                    gpsSettings.withGpsSettings(s => s.speed_threshold = value);
+                    // Keep sampling min_speed in sync with sync threshold by default
+                    gpsSettings.withSamplingSettings(ss => {
+                        if (ss.method.DistanceInterval) ss.method.DistanceInterval.min_speed = value;
+                    });
+                }
             }
         }
         Label {
@@ -193,7 +209,7 @@ MenuItem {
                 to: 120.0;
                 width: parent.width;
                 tooltip: qsTr("Maximum time shift window for GPS/gyro synchronization search.");
-                onValueChanged: gpsSection.withGpsSettings(s => s.time_offset_range_s = [-value, value])
+                onValueChanged: gpsSettings.withGpsSettings(s => s.time_offset_range_s = [-value, value])
             }
         }
         Label {
@@ -224,6 +240,210 @@ MenuItem {
             type: InfoMessage.Info;
             text: controller.gps_info_text
         }
+        Row {
+            anchors.horizontalCenter: parent.horizontalCenter;
+            LinkButton {
+                text: qsTr("Export synchronized GPX");
+                onClicked: root.showExportDialog("gpx", "gpx");
+            }
+        }
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Sampling method");
+            visible: controller.has_gps;
+            
+            ComboBox {
+                id: gpsSamplingMethod;
+                model: [
+                    qsTr("Distance interval"),
+                    qsTr("Explicit coordinates")
+                ];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                currentIndex: 0;
+                tooltip: qsTr("Distance interval: Sample frames at regular distance steps.\nWaypoint coordinates: Sample frames at specific GPS locations.");
+                
+                onCurrentIndexChanged: {
+                    gpsSettings.withSamplingSettings(ss => {
+                        if (currentIndex === 0) {
+                            // Distance interval method
+                            ss.method = {
+                                DistanceInterval: {
+                                    step_m: gpsDistanceStep.value,
+                                    min_speed: gpsMinSpeed.value
+                                }
+                            };
+                        } else {
+                            // Coordinates list method
+                            ss.method = {
+                                CoordinatesList: {
+                                    coords: []
+                                }
+                            };
+                        }
+                    });
+                    // Refresh marks when switching methods
+                    Qt.callLater(function() { gpsMap.refreshMarks(); });
+                }
+            }
+        }
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Distance interval");
+            visible: controller.has_gps && gpsSamplingMethod.currentIndex === 0;
+            
+            NumberField {
+                id: gpsDistanceStep;
+                unit: "m";
+                precision: 1;
+                from: 1.0;
+                to: 1000.0;
+                value: 10.0;
+                width: parent.width;
+                tooltip: qsTr("Distance interval for frame sampling.");
+                
+                onValueChanged: {
+                    gpsSettings.withSamplingSettings(ss => {
+                        if (!ss.method || !ss.method.DistanceInterval) {
+                            ss.method = { DistanceInterval: { step_m: value, min_speed: 0.0 } };
+                        } else {
+                            ss.method.DistanceInterval.step_m = value;
+                        }
+                    });
+                    Qt.callLater(function() { gpsMap.refreshMarks(); });
+                }
+            }
+        }
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Minimum speed");
+            visible: controller.has_gps && gpsSamplingMethod.currentIndex === 0;
+            
+            NumberField {
+                id: gpsMinSpeed;
+                unit: "m/s";
+                precision: 1;
+                from: 0.0;
+                to: 20.0;
+                value: 0.0;
+                width: parent.width;
+                tooltip: qsTr("Only sample frames when moving faster than this speed. Useful to avoid stationary segments.");
+                
+                onValueChanged: {
+                    gpsSettings.withSamplingSettings(ss => {
+                        if (!ss.method || !ss.method.DistanceInterval) {
+                            ss.method = { DistanceInterval: { step_m: 10.0, min_speed: value } };
+                        } else {
+                            ss.method.DistanceInterval.min_speed = value;
+                        }
+                    });
+                    Qt.callLater(function() { gpsMap.refreshMarks(); });
+                }
+            }
+        }
+        Label {
+            position: Label.TopPosition;
+            text: qsTr("Waypoint coordinates");
+            visible: controller.has_gps && gpsSamplingMethod.currentIndex === 1;
+            
+            Column {
+                width: parent.width;
+                spacing: 5 * dpiScale;
+                
+                QQC.TextArea {
+                    id: gpsCoordinatesList;
+                    width: parent.width;
+                    height: 100 * dpiScale;
+                    placeholderText: qsTr("Latitude, Longitude (one per line):\n37.7749, -122.4194\n37.8049, -122.4294");
+                    wrapMode: TextEdit.NoWrap;
+                    font.family: "Courier New";
+                    font.pixelSize: 11 * dpiScale;
+                    
+                    onEditingFinished: {
+                        parseAndSetCoordinates();
+                    }
+                    
+                    function parseAndSetCoordinates() {
+                        try {
+                            const lines = text.split('\n').filter(l => l.trim());
+                            const coords = [];
+                            let lineNum = 0;
+                            
+                            for (const line of lines) {
+                                lineNum++;
+                                const trimmed = line.trim();
+                                if (!trimmed || trimmed.startsWith('#')) continue;
+                                
+                                const parts = trimmed.split(/[,\s]+/).filter(p => p);
+                                if (parts.length >= 2) {
+                                    const lat = parseFloat(parts[0]);
+                                    const lon = parseFloat(parts[1]);
+                                    if (!isNaN(lat) && !isNaN(lon) && 
+                                        lat >= -90 && lat <= 90 && 
+                                        lon >= -180 && lon <= 180) {
+                                        coords.push([lat, lon]);
+                                    } else {
+                                        console.warn(`Line ${lineNum}: Invalid coordinates: ${trimmed}`);
+                                    }
+                                }
+                            }
+                            
+                            gpsSettings.withSamplingSettings(ss => {
+                                ss.method = { 
+                                    CoordinatesList: { 
+                                        coords: coords 
+                                    }
+                                };
+                            });
+                            
+                            // Refresh map to show marks
+                            Qt.callLater(function() { gpsMap.refreshMarks(); });
+                        } catch (e) {
+                            console.error("Failed to parse GPS coordinates:", e);
+                        }
+                    }
+                }
+                
+                Row {
+                    spacing: 10 * dpiScale;
+                    width: parent.width;
+                    
+                    LinkButton {
+                        text: qsTr("Import CSV");
+                        onClicked: {
+                            gpsCoordinatesFileDialog.open2();
+                        }
+                    }
+                    
+                    LinkButton {
+                        text: qsTr("Clear");
+                        onClicked: {
+                            gpsCoordinatesList.text = "";
+                            gpsCoordinatesList.parseAndSetCoordinates();
+                            Qt.callLater(function() { gpsMap.refreshMarks(); });
+                        }
+                    }
+                }
+            }
+        }
+        FileDialog {
+            id: gpsCoordinatesFileDialog;
+            title: qsTr("Import Waypoints");
+            nameFilters: [qsTr("CSV files") + " (*.csv)", qsTr("Text files") + " (*.txt)", qsTr("All files") + " (*)"];
+            type: "video";
+            onAccepted: {
+                const content = filesystem.read_text(selectedFile);
+                gpsCoordinatesList.text = content;
+                gpsCoordinatesList.parseAndSetCoordinates();
+            }
+        }
+        BasicText {
+            visible: controller.has_gps;
+            text: qsTr("%n points", "", gpsMap.marks.length);
+            color: styleTextColor;
+            font.pixelSize: 11 * dpiScale;
+            anchors.horizontalCenter: parent.horizontalCenter;
+        }
         CheckBoxWithContent {
             id: gpsMapCheckbox;
             text: qsTr("GPS map");
@@ -235,26 +455,6 @@ MenuItem {
                 }
                 Qt.callLater(gpsMap.requestPaint);
             }
-        }
-        CheckBoxWithContent {
-            id: gpsDistanceMarksCheckbox;
-            visible: gpsMapCheckbox.checked;
-            text: qsTr("Distance marks");
-            Row {
-                spacing: 6 * dpiScale;
-                BasicText { text: qsTr("Step"); }
-                NumberField {
-                    id: gpsDistanceStep;
-                    unit: "m";
-                    precision: 1;
-                    from: 1.0;
-                    to: 1000.0;
-                    width: Math.max(120 * dpiScale, root.width - 400 * dpiScale);
-                    value: 10.0;
-                    onValueChanged: if (gpsDistanceMarksCheckbox.checked) gpsMap.refreshDistanceMarks();
-                }
-            }
-            onCheckedChanged: if (gpsMapCheckbox.checked) gpsMap.refreshDistanceMarks();
         }
         Row {
             id: gpsCoordsRow;
@@ -328,16 +528,25 @@ MenuItem {
                 currPos = controller.get_gps_current_pos_for_map(Math.round(timestamp));
                 requestPaint();
             }
-            function refreshDistanceMarks(): void {
-                if (!gpsDistanceMarksCheckbox.checked) { marks = []; requestPaint(); return; }
-                const step = gpsSection.getSafeNumberFieldValue(gpsDistanceStep, 10.0);
-                const thr = gpsSection.getSafeNumberFieldValue(gpsSpeedThreshold, 0.0);
-                marks = controller.get_gps_distance_marks_for_map(step, thr, 2000);
+            function refreshMarks(): void {
+                const ss = controller.get_gps_sampling_settings();
+                if (ss.method.DistanceInterval) {
+                    // Show distance interval marks
+                    const step = ss.method.DistanceInterval.step_m;
+                    const minSpeed = ss.method.DistanceInterval.min_speed;
+                    marks = controller.get_gps_distance_marks_for_map(step, minSpeed, 2000);
+                } else if (ss.method.CoordinatesList && ss.method.CoordinatesList.coords) {
+                    // Show coordinate marks
+                    const coords = ss.method.CoordinatesList.coords;
+                    marks = controller.get_gps_coords_for_map(JSON.stringify(coords), 2000);
+                } else {
+                    marks = [];
+                }
                 requestPaint();
             }
             function refreshMap(): void {
                 refreshPolyline();
-                if (gpsDistanceMarksCheckbox.checked) refreshDistanceMarks();
+                refreshMarks();
             }
 
             onPaint: {
@@ -361,7 +570,7 @@ MenuItem {
                 const vx = (width  - s * dx) / 2 - s * minx;
                 const vy = (height - s * dy) / 2 - s * miny;
 
-                const pathColor = style === "light" ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.5)"
+                const pathColor = style === "light" ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.3)"
                 if (poly && poly.length >= 2) {
                     ctx.strokeStyle = pathColor;
                     ctx.lineWidth = 2;
@@ -379,7 +588,7 @@ MenuItem {
                     for (let i = 0; i < marks.length; i++) {
                         const x = s * marks[i][0] + vx;
                         const y = s * marks[i][1] + vy;
-                        ctx.beginPath(); ctx.arc(x, y, 3, 0, 2*Math.PI); ctx.fill();
+                        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2*Math.PI); ctx.fill();
                     }
                 }
 
@@ -387,17 +596,24 @@ MenuItem {
                     const x = s * currPos[0] + vx;
                     const y = s * currPos[1] + vy;
                     ctx.strokeStyle = styleAccentColor;
-                    ctx.beginPath(); ctx.arc(x, y, 3, 0, 2*Math.PI); ctx.stroke();
                     ctx.beginPath(); ctx.arc(x, y, 4, 0, 2*Math.PI); ctx.stroke();
                 }
             }
-            Component.onCompleted: { refreshPolyline(); if (gpsDistanceMarksCheckbox.checked) refreshDistanceMarks(); }
+            Component.onCompleted: { refreshPolyline(); refreshMarks(); }
         }
         Connections {
             target: controller
             function onChart_data_changed(): void {
-                gpsSection.visible = controller.has_gps;
-                if (gpsSection.visible && gpsMapCheckbox.checked) gpsMap.refreshPolyline();
+                gpsSettings.visible = controller.has_gps;
+                if (gpsSettings.visible && gpsMapCheckbox.checked) gpsMap.refreshPolyline();
+                if (gpsSettings.visible) gpsMap.refreshMarks();
+            }
+        }
+        Row {
+            anchors.horizontalCenter: parent.horizontalCenter;
+            LinkButton {
+                text: qsTr("Export waypoints with timestamps (CSV)");
+                onClicked: root.showExportDialog("csv", "waypoints-with-timestamps");
             }
         }
     }
@@ -411,37 +627,8 @@ MenuItem {
         onAccepted: {
             if (exportData === "gpx") {
                 controller.export_synchronized_gpx(selectedFile);
-            } else if (exportData === "gps-distance-csv") {
-                const step = gpsSection.getSafeNumberFieldValue(gpsDistanceStep, 10.0);
-                const thr = gpsSection.getSafeNumberFieldValue(gpsSpeedThreshold, 0.0);
-                controller.export_gps_distance_timestamps(selectedFile, step, thr);
-            }
-        }
-    }
-
-    Row {
-        anchors.horizontalCenter: parent.horizontalCenter;
-        LinkButton {
-            id: exportGpsBtn;
-            text: qsTr("Export");
-            onClicked: menuLoader.toggle(exportGpsBtn, 0, height);
-            Component {
-                id: menu;
-                Menu {
-                    id: menuInner;
-                    Action {
-                        text: qsTr("Export synchronized GPX");
-                        onTriggered: root.showExportDialog("gpx", "gpx");
-                    }
-                    Action {
-                        text: qsTr("Export distance timestamps (CSV)");
-                        onTriggered: root.showExportDialog("csv", "gps-distance-csv");
-                    }
-                }
-            }
-            ContextMenuLoader {
-                id: menuLoader;
-                sourceComponent: menu
+            } else if (exportData === "waypoints-with-timestamps") {
+                controller.export_gps_sampling_waypoints_with_timestamps(selectedFile);
             }
         }
     }

@@ -74,6 +74,31 @@ fn select_stream_index(fs_base: &EngineBase, url: &str, dual_stream_mode: DualSt
     None
 }
 
+fn compute_decoding_ranges_for_explicit_timestamps(duration_ms: f64, fps: f64, explicit_timestamps_ms: &[f64]) -> Vec<(Option<f64>, Option<f64>)> {
+    // Build minimal decode windows around requested timestamps to skip irrelevant frames.
+    // Timestamps are in source (video-local) milliseconds.
+    let interval_ms = if fps > 0.0 { 1000.0 / fps } else { 33.333 };
+    let margin_ms = (interval_ms * 0.5).max(2.0);
+    let mut windows: Vec<(f64, f64)> = explicit_timestamps_ms.iter()
+        .map(|t| ((t - margin_ms).max(0.0), (t + margin_ms).min(duration_ms)))
+        .collect();
+    windows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Merge overlapping windows
+    let mut merged: Vec<(f64, f64)> = Vec::with_capacity(windows.len());
+    for (mut s, mut e) in windows {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+            } else {
+                merged.push((s, e));
+            }
+        } else {
+            merged.push((s, e));
+        }
+    }
+    merged.into_iter().map(|(s, e)| (Some(s), Some(e))).collect()
+}
+
 lazy_static::lazy_static! {
     static ref GPU_TYPE: RwLock<GpuType> = RwLock::new(GpuType::Unknown);
 }
@@ -222,7 +247,7 @@ pub fn get_possible_encoders(codec: &str, use_gpu: bool) -> Vec<(&'static str, b
     encoders
 }
 
-pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &gyroflow_core::InputFile, render_options: &RenderOptions, gpu_decoder_index: i32, trim_range_ind: Option<usize>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>, encoder_initialized: F2) -> Result<(), FFmpegError>
+pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &gyroflow_core::InputFile, render_options: &RenderOptions, gpu_decoder_index: i32, trim_range_ind: Option<usize>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>, encoder_initialized: F2, explicit_timestamps_ms: Option<&[f64]>) -> Result<(), FFmpegError>
     where F: Fn((f64, usize, usize, bool, bool)) + Send + Sync + Clone,
           F2: Fn(String) + Send + Sync + Clone
 {
@@ -333,8 +358,12 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     proc.video.processing_order = order;
     log::debug!("video_codec: {:?}, processing_order: {:?}", &proc.video_codec, proc.video.processing_order);
 
-    if !render_options.pad_with_black && !render_options.preserve_other_tracks && !trim_ranges.is_empty() {
-        proc.ranges_ms = trim_ranges.iter().map(|x| (if x.0 > 0.0 { Some(x.0 * duration_ms) } else { None }, if x.1 < 1.0 { Some(x.1 * duration_ms) } else { None })).collect();
+    if !render_options.pad_with_black && !render_options.preserve_other_tracks {
+        if let Some(timestamps) = explicit_timestamps_ms {
+            proc.ranges_ms = compute_decoding_ranges_for_explicit_timestamps(duration_ms, fps, timestamps);
+        } else if !trim_ranges.is_empty() {
+            proc.ranges_ms = trim_ranges.iter().map(|x| (if x.0 > 0.0 { Some(x.0 * duration_ms) } else { None }, if x.1 < 1.0 { Some(x.1 * duration_ms) } else { None })).collect();
+        }
     }
 
     match proc.video_codec.as_deref() {
@@ -499,6 +528,25 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     let mut ramped_ts = 0.0;
     let mut final_ts = 0;
     let interval = (1_000_000.0 / fps).round() as i64;
+
+    // Explicit schedule support
+    let explicit_targets_us: Option<Vec<i64>> = explicit_timestamps_ms.map(|v| {
+        // TODO: check if this is correct
+        // Align schedule timestamps with any FPS scaling applied to decoded frame timestamps
+        let mut t: Vec<i64> = v.iter()
+            .map(|ms| (((*ms * 1000.0) / fps_scale.unwrap_or(1.0)).round() as i64))
+            .collect();
+        t.sort_unstable();
+        t
+    });
+    let explicit_total: usize = explicit_targets_us.as_ref().map(|v| v.len()).unwrap_or(0);
+    use std::cell::Cell;
+    let next_target_index = Cell::new(0usize);
+    let emitted_so_far = Cell::new(0usize);
+    let last_frame_ts = Cell::new(i64::MIN);
+    let pending_to_emit_this_frame = Cell::new(0usize);
+    let progress_fired_this_frame = Cell::new(false);
+    
     let is_speed_changed = video_speed != 1.0 || stab.keyframes.read().is_keyframed(&gyroflow_core::keyframes::KeyframeType::VideoSpeed);
     if is_speed_changed {
         proc.audio_codec = codec::Id::None; // Audio not supported when changing speed
@@ -514,8 +562,33 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         if let Some(scale) = fps_scale {
             timestamp_us = (timestamp_us as f64 / scale).round() as i64;
         }
+        // Reset per-frame progress guard
+        progress_fired_this_frame.set(false);
 
-        if is_speed_changed {
+        // If explicit schedule provided, decide whether to emit this frame and how many times
+        if let Some(ref targets) = explicit_targets_us {
+            let prev_ts = last_frame_ts.get();
+            let mut pending = 0usize;
+            let mut idx = next_target_index.get();
+            while idx < targets.len() && targets[idx] <= timestamp_us {
+                if targets[idx] > prev_ts { pending += 1; }
+                idx += 1;
+            }
+            next_target_index.set(idx);
+
+            // Configure encoder rate control to emit duplicates if multiple targets fall into one decode frame span
+            rate_control.repeat_times = pending as i64;
+            rate_control.repeat_interval = interval;
+            rate_control.out_timestamp_us = (emitted_so_far.get() as i64) * interval;
+            pending_to_emit_this_frame.set(pending);
+            
+            // Fast path: when no explicit timestamps fall into this decode frame span,
+            // skip heavy processing (format conversion, stabilization, encoding).
+            if pending == 0 {
+                last_frame_ts.set(timestamp_us);
+                return Ok(());
+            }
+        } else if is_speed_changed {
             let vid_speed = stab.keyframes.read().value_at_video_timestamp(&gyroflow_core::keyframes::KeyframeType::VideoSpeed, timestamp_us as f64 / 1000.0).unwrap_or(video_speed);
             let current_interval = ((rate_control.out_timestamp_us - prev_real_ts) as f64) / vid_speed;
             ramped_ts += current_interval;
@@ -718,7 +791,14 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             for (i, cb) in planes.iter_mut().enumerate() {
                 (*cb)(timestamp_us, frame, out_frame, i, fill_with_background);
             }
-            progress2((process_frame as f64 / render_frame_count as f64, process_frame, render_frame_count, false, false));
+            if explicit_targets_us.is_some() {
+                if pending_to_emit_this_frame.get() > 0 && !progress_fired_this_frame.replace(true) {
+                    emitted_so_far.set(emitted_so_far.get() + pending_to_emit_this_frame.get());
+                    progress2((emitted_so_far.get() as f64 / explicit_total as f64, emitted_so_far.get(), explicit_total, false, false));
+                }
+            } else {
+                progress2((process_frame as f64 / render_frame_count as f64, process_frame, render_frame_count, false, false));
+            }
         };
 
         match input_frame.format() {
@@ -741,7 +821,8 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         }
 
         process_frame += 1;
-        // log::debug!("process_frame: {}, timestamp_us: {}", process_frame, timestamp_us);
+
+        last_frame_ts.set(timestamp_us);  // for explicit schedule bookkeeping
 
         Ok(())
     });
@@ -785,7 +866,9 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         ::log::debug!("Removing {output_url}");
         let _ = gyroflow_core::filesystem::remove_file(&output_url);
     }
-    if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) {
+    if explicit_timestamps_ms.is_some() {
+        progress((1.0, explicit_total, explicit_total, true, false));
+    } else if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) {
         progress((1.0, render_frame_count, render_frame_count, true, false));
     }
 
@@ -1145,7 +1228,7 @@ where
     let dual_proc = match setup_dual_stream_processor(&fs_base, &input_file.url, gpu_decoding && gpu_decoder_index >= 0, gpu_decoder_index as usize) {
         Ok(proc) => proc,
         Err(_) => {
-            return render(stab, progress, input_file, render_options, gpu_decoder_index, trim_range_ind, cancel_flag, pause_flag, encoder_initialized);
+            return render(stab, progress, input_file, render_options, gpu_decoder_index, trim_range_ind, cancel_flag, pause_flag, encoder_initialized, None);
         }
     };
 

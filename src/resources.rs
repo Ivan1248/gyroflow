@@ -66,6 +66,7 @@ qrc!(pub rsrc,
         "resources/icons/svg/menu.svg",
         "resources/icons/svg/grid.svg",
         "resources/icons/svg/plugin.svg",
+        "resources/icons/svg/gps.svg",
 
         "src/core/gpu/compiled/stabilize.frag.qsb",
         "src/qt_gpu/compiled/texture.vert.qsb",

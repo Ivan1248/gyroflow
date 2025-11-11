@@ -145,6 +145,22 @@ struct Opts {
     /// select video stream for dual-stream cameras: 0/front, 1/back, or "stitched"
     #[argh(option)]
     stream: Option<String>,
+
+    /// frame sampling mode for sequence exports: "all" or "gps" (default: all)
+    #[argh(option, default = "String::from(\"all\")")]
+    frame_sampling: String,
+
+    /// distance interval (meters) distance interval-based frame sampling
+    #[argh(option)]
+    distance_interval: Option<f64>,
+
+    /// minimum speed (m/s) for GPS distance sampling (default: 0.0)
+    #[argh(option)]
+    sampling_min_speed: Option<f64>,
+
+    /// CSV file with GPS waypoint coordinates (lat,lon per line) for frame sampling
+    #[argh(option)]
+    sampling_coords: Option<std::path::PathBuf>,
 }
 
 pub fn will_run_in_console() -> bool {
@@ -612,6 +628,57 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                         }
                         Err(e) => {
                             log::error!("[{:08x}] Failed to load GPX file {}: {}", job_id, gpx_path, e);
+                        }
+                    }
+                }
+
+                // Apply GPS frame sampling settings from CLI (for sequence exports)
+                if opts.frame_sampling.to_ascii_lowercase() == "gps" {
+                    let stab = queue.get_stab_for_job(*job_id).unwrap();
+                    let mut applied = false;
+                    // Coordinates list takes precedence if provided
+                    if let Some(path) = opts.sampling_coords.as_ref() {
+                        match std::fs::read_to_string(path) {
+                            Ok(contents) => {
+                                let mut coords: Vec<(f64, f64)> = Vec::new();
+                                for line in contents.lines() {
+                                    let line = line.trim();
+                                    if line.is_empty() || line.starts_with('#') { continue; }
+                                    let parts: Vec<&str> = line.split(|c| c == ',' || c == ';' || c == ' ')
+                                        .filter(|s| !s.is_empty())
+                                        .collect();
+                                    if parts.len() >= 2 {
+                                        if let (Ok(lat), Ok(lon)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                                            coords.push((lat, lon));
+                                        }
+                                    }
+                                }
+                                if !coords.is_empty() {
+                                    let settings = gyroflow_core::gps::GPSFrameSamplingSettings {
+                                        method: gyroflow_core::gps::GPSFrameSamplingMethod::CoordinatesList { coords },
+                                    };
+                                    stab.set_gps_sampling_settings(settings);
+                                    applied = true;
+                                    log::info!("[{:08x}] Applied GPS sampling: coordinates list", job_id);
+                                } else {
+                                    log::warn!("[{:08x}] --sampling-coords provided but no valid coordinates parsed", job_id);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("[{:08x}] Failed to read --sampling-coords file: {}", job_id, e);
+                            }
+                        }
+                    }
+                    if !applied {
+                        if let Some(step_m) = opts.distance_interval {
+                            let min_speed = opts.sampling_min_speed.unwrap_or(0.0);
+                            let settings = gyroflow_core::gps::GPSFrameSamplingSettings {
+                                method: gyroflow_core::gps::GPSFrameSamplingMethod::DistanceInterval { step_m, min_speed },
+                            };
+                            stab.set_gps_sampling_settings(settings);
+                            log::info!("[{:08x}] Applied GPS sampling: distance step {:.3} m, min speed {:.3} m/s", job_id, step_m, min_speed);
+                        } else {
+                            log::warn!("[{:08x}] --frame-sampling gps specified but neither --distance-interval nor --sampling-coords provided; using all frames", job_id);
                         }
                     }
                 }

@@ -1077,6 +1077,16 @@ impl RenderQueue {
                     }
                 }
 
+                // Extract explicit timestamps from additional_data if present
+                let explicit_timestamps_ms: Option<Vec<f64>> = (|| {
+                    let value: serde_json::Value = serde_json::from_str(&additional_data).ok()?;
+                    let fs = value.get("frame_schedule")?;
+                    let kind = fs.get("kind").and_then(|k| k.as_str());
+                    if kind != Some("explicit_timestamps") { return None; }
+                    let arr = fs.get("timestamps_ms").and_then(|a| a.as_array())?;
+                    Some(arr.iter().filter_map(|x| x.as_f64()).collect())
+                })();
+                
                 let num_ranges = stab.params.read().trim_ranges.len();
                 let ranges_to_render = if render_options.export_trims_separately && num_ranges > 0 {
                     (0..num_ranges).map(Some).collect::<Vec<_>>()
@@ -1088,7 +1098,18 @@ impl RenderQueue {
                     if cancel_flag.load(SeqCst) { break; }
                     let mut i = 0;
                     loop {
-                        let result = rendering::render(stab.clone(), progress.clone(), &input_file, &render_options, i, range, cancel_flag.clone(), pause_flag.clone(), encoder_initialized.clone());
+                        let result = rendering::render(
+                            stab.clone(), 
+                            progress.clone(), 
+                            &input_file, 
+                            &render_options, 
+                            i, 
+                            range, 
+                            cancel_flag.clone(), 
+                            pause_flag.clone(), 
+                            encoder_initialized.clone(), 
+                            explicit_timestamps_ms.as_deref()
+                        );
                         if let Err(e) = result {
                             if let rendering::FFmpegError::PixelFormatNotSupported((fmt, supported, candidate)) = e {
                                 let candidate = if let Some(c) = candidate { format!("{c:?}").to_ascii_lowercase().to_string() } else { String::new() };

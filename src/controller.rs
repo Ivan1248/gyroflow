@@ -327,7 +327,7 @@ pub struct Controller {
     // GNSS
     load_gpx: qt_method!(fn(&self, url: QUrl)),
     export_synchronized_gpx: qt_method!(fn(&self, url: QUrl)),
-    export_gps_distance_timestamps: qt_method!(fn(&self, url: QUrl, step_m: f64, min_speed_mps: f64)),
+    export_gps_sampling_waypoints_with_timestamps: qt_method!(fn(&self, url: QUrl)),
     get_gpx_summary: qt_method!(fn(&self) -> QJsonObject),
     gps_sync_mode: qt_property!(i32; READ get_gps_sync_mode WRITE set_gps_sync_mode NOTIFY gps_changed),
     gps_offset_ms: qt_property!(f64; READ get_gps_offset_ms WRITE set_gps_offset_ms NOTIFY gps_changed),
@@ -336,14 +336,19 @@ pub struct Controller {
     get_gps_anchor: qt_method!(fn(&self) -> QString),
     get_gps_overlap: qt_method!(fn(&self) -> f64),
     get_gps_correlation: qt_method!(fn(&self) -> f64),
-    get_gps_sync_settings: qt_method!(fn(&self) -> QVariant),
-    set_gps_sync_settings: qt_method!(fn(&mut self, settings: QVariant)),
+    get_gps_sync_settings: qt_method!(fn(&self) -> QJsonObject),
+    set_gps_sync_settings: qt_method!(fn(&mut self, settings: QJsonObject)),
     get_gps_sync_result: qt_method!(fn(&self) -> QVariant),
     gps_info_text: qt_property!(QString; READ get_gps_info_text NOTIFY gps_changed),
     get_gps_trajectory_for_map: qt_method!(fn(&self, max_points: usize) -> QJsonArray),
     get_gps_current_pos_for_map: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
     get_gps_current_latlon: qt_method!(fn(&self, timestamp_us: i64) -> QJsonArray),
     get_gps_distance_marks_for_map: qt_method!(fn(&self, step_m: f64, min_speed_mps: f64, limit: usize) -> QJsonArray),
+    get_gps_coords_for_map: qt_method!(fn(&self, coords: QVariant, limit: usize) -> QJsonArray),
+    get_gps_sampling_settings: qt_method!(fn(&self) -> QJsonObject),
+    set_gps_sampling_settings: qt_method!(fn(&mut self, settings: QJsonObject)),
+    get_gps_sampling_settings_description: qt_method!(fn(&self) -> QString),
+    get_frame_schedule_from_gps_sampling: qt_method!(fn(&self) -> QJsonObject),
     gps_changed: qt_signal!(),
 }
 
@@ -1615,10 +1620,62 @@ impl Controller {
         (cx, cy, max_range)
     }
 
-    fn normalize_for_map(x: f64, y: f64, cx: f64, cy: f64, max_range: f64) -> (f64, f64) {
+    fn normalize_point_for_map(x: f64, y: f64, cx: f64, cy: f64, max_range: f64) -> (f64, f64) {
         let x_norm = ((x - cx) / max_range) + 0.5;
         let y_norm = ((y - cy) / max_range) + 0.5; 
         (x_norm, -y_norm)  // invert Y so north is up on the screen
+    }
+
+    fn build_enu_coords_from_track(lat: &[f64], lon: &[f64]) -> Vec<(f64, f64)> {
+        if lat.len().min(lon.len()) == 0 {
+            return Vec::new();
+        }
+        let ref_lat = lat[0];
+        let ref_lon = lon[0];
+        lat.iter()
+            .zip(lon.iter())
+            .map(|(&la, &lo)| latlon_to_enu(la, lo, ref_lat, ref_lon))
+            .collect()
+    }
+
+    fn get_subsampling_step_size(len: usize, max_len: usize) -> usize {
+        (len as f64 / max_len.max(1) as f64).ceil() as usize
+    }
+
+    fn normalize_points_for_map(enu_coords: &[(f64, f64)], cx: f64, cy: f64, max_range: f64) -> Vec<(f64, f64)> {
+        enu_coords.iter().map(|&(x, y)| Self::normalize_point_for_map(x, y, cx, cy, max_range)).collect()
+    }
+
+    fn compute_normalized_points_for_coords(lat: &[f64], lon: &[f64], coords: &[(f64, f64)], max_len: usize) -> Vec<(f64, f64)> {
+        if lat.len().min(lon.len()) < 2 || coords.is_empty() {
+            return coords.iter().map(|_| (0.0, 0.0)).collect();
+        }
+        let enu_coords = Self::build_enu_coords_from_track(lat, lon);
+        let (cx, cy, max_range) = Self::get_enu_bounds(&enu_coords);
+        let step = Self::get_subsampling_step_size(coords.len(), max_len);
+        coords.iter()
+            .step_by(step.max(1))
+            .map(|&(lat_i, lon_i)| {
+                let (dx, dy) = latlon_to_enu(lat_i, lon_i, lat[0], lon[0]);
+                Self::normalize_point_for_map(dx, dy, cx, cy, max_range)
+            })
+            .collect()
+    }
+
+    fn compute_distance_marks_for_map(track_time: &[f64], lat: &[f64], lon: &[f64], times_ms: &[f64], offset_ms: f64, limit: usize) -> Vec<(f64, f64)> {
+        let coords: Vec<(f64, f64)> = times_ms.iter().map(|t_ms| 
+            linear_interpolate_latlon(track_time, lat, lon, (t_ms - offset_ms) / 1000.0)
+        ).collect();
+        Self::compute_normalized_points_for_coords(lat, lon, &coords, limit)
+    }
+
+    fn parse_coords_from_qvariant(coords: &QVariant) -> Vec<(f64, f64)> {
+        let coords_str = coords.to_qstring().to_string();
+        if coords_str.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(&coords_str).unwrap_or_default()
+        }
     }
 
     fn get_gps_trajectory_for_map(&self, max_points: usize) -> QJsonArray {
@@ -1627,21 +1684,14 @@ impl Controller {
         let n = track.len();
         if n < 2 { return QJsonArray::default(); }
 
-        let enu_coords: Vec<(f64, f64)> = track.lat.iter().zip(&track.lon).map(|(&lat, &lon)| latlon_to_enu(lat, lon, track.lat[0], track.lon[0])).collect();
-        let (cx, cy, max_range) = Self::get_enu_bounds(&enu_coords);
-
-        // Downsample by step to limit payload
-        let step = (n as f64 / max_points.max(2) as f64).ceil() as usize;
-        let out: Vec<[f64; 2]> = (0..n)
-            .step_by(step)
-            .map(|i| {
-                let (x, y) = enu_coords[i];
-                let (x_norm, y_norm) = Self::normalize_for_map(x, y, cx, cy, max_range);
-                [x_norm, y_norm]
-            })
-            .collect();
-        
-        util::serde_json_to_qt_array(&serde_json::json!(out))
+        let enu_coords = Self::build_enu_coords_from_track(&track.lat, &track.lon);
+        let sampled_coords = (0..n)
+            .step_by(Self::get_subsampling_step_size(enu_coords.len(), max_points))
+            .map(|i| enu_coords[i].clone())
+            .collect::<Vec<(f64, f64)>>();
+        let (cx, cy, max_range) = Self::get_enu_bounds(&sampled_coords);
+        let map_coords = Self::normalize_points_for_map(&sampled_coords, cx, cy, max_range);
+        util::serde_json_to_qt_array(&serde_json::json!(map_coords))
     }
 
     fn get_gps_interpolated_latlon(&self, timestamp_us: i64) -> Option<(f64, f64)> {
@@ -1659,11 +1709,14 @@ impl Controller {
         let track_opt = self.stabilizer.get_gps_track();
         let Some(track) = track_opt.as_ref() else { return QJsonArray::default(); };
 
-        let enu_coords: Vec<(f64, f64)> = track.lat.iter().zip(&track.lon).map(|(&lat, &lon)| latlon_to_enu(lat, lon, track.lat[0], track.lon[0])).collect();
+        let enu_coords: Vec<(f64, f64)> = track.lat.iter()
+            .zip(&track.lon)
+            .map(|(&lat, &lon)| latlon_to_enu(lat, lon, track.lat[0], track.lon[0]))
+            .collect();
         let (cx, cy, max_range) = Self::get_enu_bounds(&enu_coords);
 
         let (dx, dy) = latlon_to_enu(lat, lon, track.lat[0], track.lon[0]);
-        let (x_norm, y_norm) = Self::normalize_for_map(dx, dy, cx, cy, max_range);
+        let (x_norm, y_norm) = Self::normalize_point_for_map(dx, dy, cx, cy, max_range);
 
         util::serde_json_to_qt_array(&serde_json::json!([x_norm, y_norm, lat, lon]))
     }
@@ -1682,25 +1735,24 @@ impl Controller {
         let times_ms = self.stabilizer.compute_gps_distance_timestamps_ms(step_m, min_speed_mps);
         if times_ms.is_empty() { return QJsonArray::default(); }
 
-        let stride = (times_ms.len() as f64 / limit.max(1) as f64).ceil() as usize;
-
-        let enu_coords: Vec<(f64, f64)> = track.lat.iter().zip(&track.lon).map(|(&lat, &lon)| latlon_to_enu(lat, lon, track.lat[0], track.lon[0])).collect();
-        let (cx, cy, max_range) = Self::get_enu_bounds(&enu_coords);
-
         let offset_ms = self.stabilizer.get_gps_offset_ms();
-        let mut out: Vec<[f64; 2]> = Vec::with_capacity((times_ms.len() + stride - 1) / stride);
-        let mut idx = 0usize;
-        while idx < times_ms.len() {
-            let t_s = (times_ms[idx] - offset_ms) / 1000.0;
-            let (lat, lon) = linear_interpolate_latlon(&track.time, &track.lat, &track.lon, t_s);
-            let (dx, dy) = latlon_to_enu(lat, lon, track.lat[0], track.lon[0]);
-            let (x_norm, y_norm) = Self::normalize_for_map(dx, dy, cx, cy, max_range);
-            out.push([x_norm, y_norm]);
+        let points = Self::compute_distance_marks_for_map(&track.time, &track.lat, &track.lon, &times_ms, offset_ms, limit);
+        util::serde_json_to_qt_array(&serde_json::json!(points))
+    }
 
-            idx += stride.max(1);
-        }
+    fn get_gps_coords_for_map(&self, coords: QVariant, limit: usize) -> QJsonArray {
+        let track_opt = self.stabilizer.get_gps_track();
+        let Some(track) = track_opt.as_ref() else { return QJsonArray::default(); };
+        let n = track.len();
+        if n < 2 { return QJsonArray::default(); }
 
-        util::serde_json_to_qt_array(&serde_json::json!(out))
+        // Deserialize coordinates from QML JSON string
+        let coords_vec: Vec<(f64, f64)> = Self::parse_coords_from_qvariant(&coords);
+        if coords_vec.is_empty() { return QJsonArray::default(); }
+
+        // Compute normalized points and serialize
+        let points = Self::compute_normalized_points_for_coords(&track.lat, &track.lon, &coords_vec, limit);
+        util::serde_json_to_qt_array(&serde_json::json!(points))
     }
 
     fn has_gps(&self) -> bool {
@@ -1743,33 +1795,97 @@ impl Controller {
             self.error(QString::from("An error occured: %1"), QString::from(err.to_string()), QString::default());
         }
     }
-    fn export_gps_distance_timestamps(&self, url: QUrl, step_m: f64, min_speed_mps: f64) {
+    fn get_waypoints_coords_and_times(&self) -> Option<(Vec<(f64, f64)>, Vec<f64>)> {
+        let settings = self.stabilizer.get_gps_sampling_settings();
+        let times_ms = self.stabilizer.compute_gps_frame_timestamps_from_sampling();
+        if times_ms.is_empty() { return None; }
+
+        let video_start_time = self.stabilizer.params.read().video_created_at.unwrap_or(0) as f64;
+        let adjusted_times_ms = times_ms.iter().map(|&t| t + video_start_time * 1000.0).collect::<Vec<f64>>();
+
+        match &settings.method {
+            core::gps::GPSFrameSamplingMethod::DistanceInterval { .. } => {
+                // For distance interval, compute coordinates from track at each timestamp
+                if let Some(track) = self.stabilizer.get_gps_track().as_ref() {
+                    let mut coords = Vec::new();
+                    for &t_ms in &times_ms {
+                        let t_s = t_ms / 1000.0 - self.stabilizer.gps.read().offset_ms / 1000.0;
+                        if let Some(idx) = track.time.iter().position(|&time| time >= t_s) {
+                            coords.push((track.lat[idx], track.lon[idx]));
+                        }
+                    }
+                    Some((coords, adjusted_times_ms))
+                } else {
+                    None
+                }
+            }
+            core::gps::GPSFrameSamplingMethod::CoordinatesList { coords } => {
+                Some((coords.clone(), adjusted_times_ms))
+            }
+        }
+    }
+
+    fn export_gps_sampling_waypoints_with_timestamps(&self, url: QUrl) {
         let url = util::qurl_to_encoded(url);
         if url.is_empty() { return; }
-        if step_m <= 0.0 {
-            self.error(QString::from("An error occured: %1"), QString::from("Step must be > 0"), QString::default());
-            return;
-        }
         if !self.has_gps() {
             self.error(QString::from("An error occured: %1"), QString::from("No GPS track loaded"), QString::default());
             return;
         }
 
-        let times_ms = self.stabilizer.compute_gps_distance_timestamps_ms(step_m, min_speed_mps);
-        if times_ms.is_empty() {
-            self.error(QString::from("An error occured: %1"), QString::from("No distance marks found"), QString::default());
+        let Some((coords, times_ms)) = self.get_waypoints_coords_and_times() else {
+            self.error(QString::from("An error occured: %1"), QString::from("No waypoints found"), QString::default());
             return;
-        }
+        };
 
         let file_path = filesystem::url_to_path(&url);
-        let video_start_time = self.stabilizer.params.read().video_created_at.unwrap_or(0) as f64;
-        if let Err(err) = gyroflow_core::gps::save_distance_timestamps_csv(&file_path, step_m, &times_ms, Some(video_start_time)) {
+        if let Err(err) = gyroflow_core::gps::save_waypoints_with_timestamps_csv(&file_path, &coords, &times_ms) {
             self.error(QString::from("An error occured: %1"), QString::from(err.to_string()), QString::default());
         }
     }
+
     fn get_gpx_summary(&self) -> QJsonObject {
-        use crate::util::serde_json_to_qt_object;
-        serde_json_to_qt_object(&self.stabilizer.get_gpx_summary())
+        util::serde_json_to_qt_object(&self.stabilizer.get_gpx_summary())
+    }
+
+    fn get_gps_sampling_settings(&self) -> QJsonObject {
+        let settings = self.stabilizer.get_gps_sampling_settings();
+        let json = serde_json::to_value(&settings).unwrap_or_else(|_| {
+            // Ensure we always return a valid structure with a `method` field
+            let def = crate::core::gps::GPSFrameSamplingSettings::default();
+            serde_json::to_value(&def).unwrap_or(serde_json::Value::Object(Default::default()))
+        });
+        util::serde_json_to_qt_object(&json)
+    }
+    fn set_gps_sampling_settings(&mut self, settings: QJsonObject) {
+        let json_str = settings.to_json().to_string();
+        if let Ok(parsed) = serde_json::from_str::<core::gps::GPSFrameSamplingSettings>(&json_str) {
+            self.stabilizer.set_gps_sampling_settings(parsed);
+            self.gps_changed();
+        }
+    }
+    fn get_frame_schedule_from_gps_sampling(&self) -> QJsonObject {
+        let times_ms = self.stabilizer.compute_gps_frame_timestamps_from_sampling();
+        if times_ms.is_empty() { return QJsonObject::default(); }
+        let json = serde_json::json!({
+            "frame_schedule": {
+                "kind": "explicit_timestamps",
+                "timestamps_ms": times_ms,
+            }
+        });
+        util::serde_json_to_qt_object(&json)
+    }
+
+    fn get_gps_sampling_settings_description(&self) -> QString {
+        let s = self.stabilizer.get_gps_sampling_settings();
+        match s.method {
+            crate::core::gps::sampling::GPSFrameSamplingMethod::DistanceInterval { step_m, min_speed } => {
+                QString::from(format!("distance interval {:.1} m, min. speed: {:.1} m/s", step_m, min_speed))
+            }
+            crate::core::gps::sampling::GPSFrameSamplingMethod::CoordinatesList { ref coords } => {
+                QString::from(format!("Coordinates list ({} points)", coords.len()))
+            }
+        }
     }
 
     fn recompute_gps_sync(&self) {
@@ -1790,16 +1906,16 @@ impl Controller {
     fn get_gps_anchor(&self) -> QString { QString::from(self.stabilizer.get_gps_anchor()) }
     fn get_gps_overlap(&self) -> f64 { self.stabilizer.get_gps_overlap() }
     fn get_gps_correlation(&self) -> f64 { self.stabilizer.get_gps_correlation().unwrap_or(f64::NAN) }
-    fn get_gps_sync_settings(&self) -> QVariant {
+    fn get_gps_sync_settings(&self) -> QJsonObject {
         let settings = self.stabilizer.get_gps_sync_settings();
-        QString::from(serde_json::to_string(&settings).unwrap_or_default()).into()
+        let json = serde_json::to_value(&settings).unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+        util::serde_json_to_qt_object(&json)
     }
-    fn set_gps_sync_settings(&mut self, settings: QVariant) {
-        if let Some(settings_str) = settings.to_qstring().to_string().into() {
-            if let Ok(settings) = serde_json::from_str::<GpsSyncSettings>(&settings_str) {
-                self.stabilizer.set_gps_sync_settings(settings);
-                self.recompute_gps_sync();
-            }
+    fn set_gps_sync_settings(&mut self, settings: QJsonObject) {
+        let json_str = settings.to_json().to_string();
+        if let Ok(parsed) = serde_json::from_str::<GpsSyncSettings>(&json_str) {
+            self.stabilizer.set_gps_sync_settings(parsed);
+            self.recompute_gps_sync();
         }
     }
     fn get_gps_sync_result(&self) -> QVariant {
@@ -2770,6 +2886,7 @@ pub struct Filesystem {
     remove_file:              qt_method!(fn(&self, url: QUrl)),
     folder_access_granted:    qt_method!(fn(&self, url: QUrl)),
     move_to_trash:            qt_method!(fn(&self, url: QUrl)),
+    read_text:                qt_method!(fn(&self, url: QUrl) -> QString),
     save_allowed_folders:     qt_method!(fn(&self)),
     restore_allowed_folders:  qt_method!(fn(&self)),
     get_next_file_url:        qt_method!(fn(&self, current_url: QUrl, index: i32) -> QUrl),
@@ -2845,5 +2962,16 @@ impl Filesystem {
             }
         }
         QUrl::default()
+    }
+
+    fn read_text(&self, url: QUrl) -> QString {
+        let url_str = util::qurl_to_encoded(url);
+        match filesystem::read(&url_str) {
+            Ok(bytes) => QString::from(String::from_utf8_lossy(&bytes).to_string()),
+            Err(e) => {
+                ::log::error!("Failed to read file {}: {:?}", url_str, e);
+                QString::default()
+            }
+        }
     }
 }

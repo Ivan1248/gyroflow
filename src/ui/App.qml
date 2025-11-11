@@ -89,6 +89,7 @@ Rectangle {
     property alias videoArea: videoArea;
     property alias motionData: motionData.item;
     property alias lensProfile: lensProfile.item;
+    property alias gps: gps.item;
     property alias outputFile: outputFile;
     property alias sync: sync.item;
     property alias stab: stab.item;
@@ -761,13 +762,18 @@ Rectangle {
     }
 
     function getAdditionalProjectData(): var {
-        return {
+        const obj = {
             "output": exportSettings.item.getExportOptions(),
             "synchronization": sync.item.getSettings(),
 
             "muted": window.videoArea.vid.muted,
             "playback_speed": window.videoArea.vid.playbackRate
         };
+        // Inject explicit frame schedule for GPS-based sequence exports
+        if (exportSettings.item.frameSamplingMode === "GPS waypoints") {
+            Object.assign(obj, controller.get_frame_schedule_from_gps_sampling());
+        }
+        return obj;
     }
     function getAdditionalProjectDataJson(): string { return JSON.stringify(getAdditionalProjectData()); }
 

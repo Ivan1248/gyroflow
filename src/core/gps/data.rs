@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright © 2022 Ivan Grubišić <ivan.grubisic at gmail>
+// Copyright © 2022 Ivan <ivan.grubisic at gmail>
 
 use super::processing::{haversine_distance_m, initial_bearing_deg, BearingConvention};
 

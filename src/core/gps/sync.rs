@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright © 2022 Ivan Grubišić <ivan.grubisic at gmail>
+// Copyright © 2025 Ivan <ivan.grubisic at gmail>
 
 use super::processing::unwrap_angles_deg;
 use crate::gyro_source::GyroSource;
@@ -53,6 +53,7 @@ impl Default for GpsSyncMethod {
 
 /// GPS synchronization settings
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct GpsSyncSettings {
     pub speed_threshold: f64,  // m/s
     pub time_offset_range_s: (f64, f64),  // (min_offset_s, max_offset_s) in seconds

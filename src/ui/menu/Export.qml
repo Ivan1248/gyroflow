@@ -113,6 +113,15 @@ MenuItem {
     property string outCodecOptions: "";
     property real originalWidth: outWidth;
     property real originalHeight: outHeight;
+    // Frame sampling options
+    property string frameSamplingMode: "All";
+	property string gpsSamplingDescription: controller.get_gps_sampling_settings_description();
+	Connections {
+		target: controller
+		function onGps_changed(): void {
+			root.gpsSamplingDescription = controller.get_gps_sampling_settings_description();
+		}
+	}
 
     property bool canExport: !resolutionWarning.visible && !resolutionWarning2.visible;
 
@@ -299,6 +308,35 @@ MenuItem {
             if (format.name == "ProRes") currentIndex = 3; // ProRes HQ by default
             if (format.name == "DNxHD") currentIndex = 2; // DNxHR HQ by default
         }
+    }
+    // Frame sampling options (for PNG/EXR sequences)
+    Label {
+        position: Label.LeftPosition;
+        text: qsTr("Frame sampling");
+        visible: exportFormats[codec.currentIndex].name.includes("Sequence");
+        ComboBox {
+            id: frameSamplingCombo;
+			model: controller.has_gps ? [qsTr("All"), qsTr("GPS waypoints")] : [qsTr("All")];
+            width: parent.width;
+            currentIndex: root.frameSamplingMode === "GPS waypoints" ? 1 : 0;
+            onCurrentTextChanged: root.frameSamplingMode = currentText;
+			onVisibleChanged: {
+				if (visible && !controller.has_gps && root.frameSamplingMode === "GPS waypoints") {
+					root.frameSamplingMode = "All";
+				}
+			}
+            tooltip: qsTr("Select which frames to export. 'GPS waypoints' exports frames sampled according settings in the GPS section.");
+        }
+    }
+	InfoMessageSmall {
+		type: InfoMessage.Warning;
+		show: frameSamplingCombo.visible && !controller.has_gps;
+		text: qsTr("To use GPS waypoints, load a GPX file and configure sampling in the GPS section.");
+	}
+    InfoMessageSmall {
+		show: frameSamplingCombo.visible && controller.has_gps && root.frameSamplingMode === "GPS waypoints";
+        type: InfoMessage.Info;
+		text: qsTr("Uses GPS settings: %1").arg(root.gpsSamplingDescription)
     }
     Label {
         position: Label.LeftPosition;

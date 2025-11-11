@@ -217,7 +217,6 @@ MenuItem {
         model: ({
             "File name": "---",
             "Detected format": "---",
-            "GPX status": "---"
         })
     }
     Label {

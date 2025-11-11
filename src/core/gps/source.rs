@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright © 2022 Ivan Grubišić <ivan.grubisic at gmail>
 
 use super::data::GpsTrack;
 use super::sync::GpsSyncResult;
+use super::sampling::{GPSFrameSamplingSettings, GPSFrameSamplingMethod};
 use super::processing::{resample_linear, unwrap_angles_deg};
 use super::sync::{synchronize_gps_gyro, sample_gyro_yaw_at_times, GpsSyncSettings, preprocess_angular_signal, signal_pearson_correlation};
 use crate::gyro_source::GyroSource;
@@ -145,6 +145,7 @@ pub struct GpsSource {
     pub sync_mode: GPSSyncMode,
     pub use_processed_motion: bool,
     pub sync_settings: GpsSyncSettings,  // Consolidated sync settings
+    pub sampling_settings: GPSFrameSamplingSettings,  // Frame sampling settings
 }
 
 impl Default for GpsSource {
@@ -156,6 +157,7 @@ impl Default for GpsSource {
             sync_mode: GPSSyncMode::default(),
             use_processed_motion: false,
             sync_settings: GpsSyncSettings::default(),
+            sampling_settings: GPSFrameSamplingSettings::default(),
         }
     }
 }
@@ -243,6 +245,14 @@ impl GpsSource {
         self.sync_settings = settings;
     }
 
+    /// Get the current GPS frame sampling settings as a single struct
+    pub fn get_sampling_settings(&self) -> GPSFrameSamplingSettings { self.sampling_settings.clone() }
+
+    /// Set GPS frame sampling settings from a single struct
+    pub fn set_sampling_settings(&mut self, settings: GPSFrameSamplingSettings) {
+        self.sampling_settings = settings;
+    }
+
     /// Get the full synchronization result (if available)
     pub fn get_sync_result(&self) -> Option<GpsSyncResult> {
         self.sync_result
@@ -261,16 +271,17 @@ impl GpsSource {
         self.offset_ms = original_offset_ms;
     }
 
-    pub fn summary_json(&self, video_duration_ms: f64) -> serde_json::Value {
+    pub fn summary_json(&self, video_duration_ms: f64, video_creation_time_s: f64) -> serde_json::Value {
         match self.track.as_ref() {
             None => serde_json::json!({ "loaded": false }),
             Some(track) => {
                 let alignment = TimeAlignment::compute(track, video_duration_ms, true, self.offset_ms);
+                let start_time_s = track.get_start_time().unwrap_or(0.0);
                 serde_json::json!({
                     "loaded": true,
                     "points": track.len(),
-                    "epoch_start_s": track.get_start_time(),
-                    "epoch_end_s": track.time.last(),
+                    "epoch_start_s": video_creation_time_s + start_time_s,
+                    "duration_ms": track.time.last().copied().unwrap_or(0.0) * 1000.0 - start_time_s * 1000.0,
                     "anchor": alignment.anchor.as_label(),
                     "overlap_ms": alignment.overlap_ms,
                     "overlap_ratio": alignment.overlap_ratio,
@@ -306,6 +317,43 @@ impl GpsSource {
         // Ensure strict monotonicity and remove accidental duplicates from numeric issues
         out_ms.dedup_by(|a, b| (*a - *b).abs() < 0.25); // treat <0.25ms as duplicates
         out_ms
+    }
+
+
+
+    /// Compute timestamps (ms) according to the provided GPS frame sampling settings
+    pub fn compute_sampling_timestamps_ms(&self, duration_ms: f64, settings: &GPSFrameSamplingSettings) -> Vec<f64> {
+        match &settings.method {
+            GPSFrameSamplingMethod::DistanceInterval { step_m, min_speed } => {
+                self.compute_distance_timestamps_ms(duration_ms, *step_m, *min_speed)
+            }
+            GPSFrameSamplingMethod::CoordinatesList { coords } => { 
+                // TODO: extract into separate function 
+                // TODO: take into account motion direction if there are overlapping path segments with opposite directions
+                let track = match self.track.as_ref() { Some(t) => t, None => return vec![] };
+                if coords.is_empty() { return vec![]; }
+                let n = track.len();
+                if n == 0 { return vec![]; }
+
+                let mut out = Vec::with_capacity(coords.len());
+                for &(lat_t, lon_t) in coords {
+                    // Linear scan for nearest point; can be optimized later (KD-tree)
+                    let mut best_idx = 0usize;
+                    let mut best_dist = f64::INFINITY;
+                    for i in 0..n {
+                        let d = super::processing::haversine_distance_m(track.lat[i], track.lon[i], lat_t, lon_t);
+                        if d < best_dist { best_dist = d; best_idx = i; }
+                    }
+                    let t_ms = self.offset_ms + track.time[best_idx] * 1000.0;
+                    if t_ms >= 0.0 && t_ms <= duration_ms {
+                        out.push(t_ms);
+                    }
+                }
+                out.sort_by(|a, b| a.total_cmp(b));
+                out.dedup_by(|a, b| (*a - *b).abs() < 0.25);
+                out
+            }
+        }
     }
 }
 
