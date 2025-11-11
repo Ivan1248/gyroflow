@@ -1,10 +1,13 @@
 ## Gyroflow with motion direction alignment and GPS synchronization 
 
 This repository contains a modified version of [Gyroflow](https://github.com/gyroflow/gyroflow) for the purposes of a road safety assesment project. The following functionality is added:
-- Motion direction alignment – the virtual camera is pointed in the direction of motion estimated using relative pose estimation. Using the back camera stream is supported.
-- GPS synchronization – GPX files can be loaded, synchronized with the motion estimated from IMU data and motion direction alignment.
+- Motion direction alignment – the virtual camera is pointed in the direction of motion estimated using relative pose estimation.
+- Secondary video stream selection option.
+- GPS synchronization – GPX files can be loaded and synchronized with the motion estimated from IMU data and motion direction alignment.
+- Frame sampling based on GPS coordinates (pre-defined or based on a distance interval).
 - GPS data visualization – a simple map and GPS course angle alignment chart option in the timeline.
-- Frame sampling based on GPS coordinate sampling (pre-defined or based on a distance interval).
+
+Some features are work-in-progress and the implementations can be improved.
 
 ## Data extraction from omnidirectional videos
 
