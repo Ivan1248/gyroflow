@@ -28,12 +28,16 @@ Our videos have been recorded with head-mounted omnidirectional cameras. They co
     - [x] Automatic
       - [x] Using motion direction and smoothing with speed threshold
   - [x] Visualization (map and synchronization plots)
-  - [x] GPX saving
-  - [x] Method to determine when GPS synchronization doesn't work (e.g. due to no turns)
+  - [x] GPX export
+  - [x] GPS-based frame sampling
+    - [x] Based on a distance interval with speed-based filtering
+    - [x] Based on explicit coordinatex (CSV)
+  - [x] CSV waypoints export
+  - [x] Method to determine when GPS synchronization doesn't work (e.g. due to no turns) – 
 	  - See evaluation results in [EVALUATION.md](EVALUATION.md)
 - [x] Secondary (backward-camera) video stream support (for backward facing cameras)
   - [x] CLI support for stream selection (`--stream 0/1`)
-  - [x] Stitching of front and back video streams
+  - [ ] Stitching of front and back video streams
   - [ ] Equirectangular projection?
 - [ ] Added distortion
 - [x] CLI and batch processing
@@ -189,22 +193,63 @@ This will:
 4. Create a GPS synchronization report with offset, error, correlation, and course range information (`--report-gps <path>`, requires `--export-gpx`)
 5. Use the first video stream (`--stream 0`)
 
+
+**Render images correspondin to selected GPS waypoints:**
+
+For rendering of individual frames as images at regular distances, use:
+```
+  -p '{ "output_path": "frames/%05d.png", "codec": "PNG" }' \
+```
+and additionally supply:
+```
+  --frame-sampling gps \
+  --distance-interval 10.0 \
+  --sampling-min-speed 1.0 \
+```
+For pre-defined GPS coordinates, supply:
+```
+  --sampling-coords waypoints.csv \
+```
+instead of `distance-interval` and `sampling-min-speed`.
+
+
 ### CLI Options Reference
 
 #### Dual-stream video processing
+
 - `--stream <mode>`: Select video stream
   - `0` or `front` (default): Use front/default camera stream
   - `1` or `back`: Use back camera stream
   - `stitched`: use stitched dual-stream mode (not implemented)
 
 #### Motion analysis and reporting
+
 - `--report-motion <path>`: Create motion report file with average translation direction and forward stream information
 
 #### GPS synchronization and reporting
+
 - `--input-gpx <file>`: Load GPX track file for synchronization
 - `--export-gpx <path>`: Export synchronized GPX file
 - `--gps-settings <json>`: GPS synchronization settings (sync_mode, use_processed_motion, speed_threshold, max_time_offset_s, sample_rate_hz)
 - `--report-gps <path>`: Generate GPS synchronization report with offset, error, correlation, and course range information
+
+#### GPS waypoint-based frame sampling
+
+- `--frame-sampling <mode>`: Frame sampling mode for sequence exports
+  - `all` (default): Export all frames
+  - `gps`: Export frames sampled based on GPS data
+- `--distance-interval <meters>`: Sample frames at regular distance intervals along the GPS track (requires `--frame-sampling gps`)
+- `--sampling-min-speed <m/s>`: Minimum speed threshold for GPS distance sampling (default: 0.0 m/s). Frames are only sampled when the GPS speed exceeds this threshold (requires `--distance-interval`)
+- `--sampling-coords <file>`: CSV file containing GPS waypoint coordinates for frame sampling (lat,lon per line). Overrides distance-based sampling when provided (requires `--frame-sampling gps`)
+
+**CSV format for waypoints:**
+```
+# Latitude and longitude coordinates, one per line
+lat1,lon1
+lat2,lon2
+```
+Additional columns are allowed and ignored in parsing.
+
 
 ## Batch processing scripts
 
@@ -224,7 +269,7 @@ input_root/
 └── ...
 ```
 
-**Output structure:**
+**Output structure (video):**
 ```
 output/
 ├── session1/
