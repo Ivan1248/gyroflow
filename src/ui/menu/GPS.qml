@@ -354,9 +354,9 @@ MenuItem {
                     id: gpsCoordinatesList;
                     width: parent.width;
                     height: 100 * dpiScale;
-                    placeholderText: qsTr("Latitude, Longitude (one per line):\n37.7749, -122.4194\n37.8049, -122.4294");
+                    placeholderText: qsTr("Latitude, Longitude (one per line)");
                     wrapMode: TextEdit.NoWrap;
-                    font.family: "Courier New";
+                    font.family: "Monospace";
                     font.pixelSize: 11 * dpiScale;
                     
                     onEditingFinished: {
