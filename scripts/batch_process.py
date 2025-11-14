@@ -60,7 +60,8 @@ def process_directory(rec_dir: Path,
                       gyroflow_cmd: str,
                       preset: dict,
                       keep_backward: bool = False,
-                      no_render: bool = False) -> None:
+                      no_render: bool = False,
+                      crop_gpx: bool = False) -> None:
     """Process a single recording directory."""
     rec_name = rec_dir.name
     out_dir = output_root_abs / rec_name
@@ -88,19 +89,36 @@ def process_directory(rec_dir: Path,
 
     # Process each stream (0 and 1)
     for stream in [0, 1]:
+        # Build preset and output parameters
+        # frame_schedule must be in preset (top level) to be merged into additional_data
+        preset_to_use = preset.copy()
+        if no_render:
+            # When no_render is enabled, use PNG Sequence codec with explicit timestamps
+            # This renders only a single frame, which is more appropriate than MP4 for individual frames
+            preset_to_use["frame_schedule"] = {
+                "kind": "explicit_timestamps",
+                "timestamps_ms": [0.0]  # Render only the first frame at 0ms
+            }
+            output_params = {
+                "output_path": f"{out_stem}_s{stream}_%05d.png",
+                "codec": "PNG Sequence"
+            }
+        else:
+            output_params = {"output_path": f"{out_stem}_s{stream}.mp4"}
+        
         cmd = [
             gyroflow_cmd,
             str(vid_file), "--stream",
             str(stream), "--preset",
-            json.dumps(preset), "--overwrite", "-p",
-            json.dumps({"output_path": f"{out_stem}_s{stream}.mp4"}), "--input-gpx",
+            json.dumps(preset_to_use), "--overwrite", "-p",
+            json.dumps(output_params), "--input-gpx",
             str(gpx_file), "--gps-settings",
             json.dumps(GPS_SETTINGS), "--export-gpx", f"{out_stem}_s{stream}.gpx",
             "--report-motion", f"{out_stem}_s{stream}_motion.txt", "--report-gps",
             f"{out_stem}_s{stream}_gps.txt"
         ]
-        if no_render:
-            cmd.append("--no-render")
+        if crop_gpx:
+            cmd.append("--crop-gpx")
 
         print(f"Running: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=False, text=True)
@@ -118,8 +136,16 @@ def process_directory(rec_dir: Path,
                 print(f"Stream {stream} does not have forward motion")
                 if not keep_backward:
                     print("Deleting backward-looking files except reports")
-                    for ext in ["mp4", "gpx"][int(no_render):]:
-                        (out_stem.parent / f"{vid_name}_s{stream}.{ext}").unlink(missing_ok=True)
+                    # Delete output files (MP4/PNG) and GPX files (reports are kept)
+                    if no_render:
+                        # Delete PNG sequence file (e.g., video_s0_00001.png)
+                        png_file = out_stem.parent / f"{vid_name}_s{stream}_00001.png"
+                        png_file.unlink(missing_ok=True)
+                    else:
+                        # Delete MP4 file
+                        (out_stem.parent / f"{vid_name}_s{stream}.mp4").unlink(missing_ok=True)
+                    # Always delete GPX file
+                    (out_stem.parent / f"{vid_name}_s{stream}.gpx").unlink(missing_ok=True)
                 else:
                     print("Keeping backward-looking files (--keep-backward enabled)")
         else:
@@ -127,13 +153,24 @@ def process_directory(rec_dir: Path,
 
     # Rename files from the stream with forward motion (only if not keeping backward streams)
     if not keep_backward and fwd_stream is not None:
+        # If no_render is enabled, delete the single-frame PNG file (not useful)
+        if no_render:
+            png_file = out_stem.parent / f"{vid_name}_s{fwd_stream}_00001.png"
+            if png_file.exists():
+                png_file.unlink()
+                print(f"Deleted single-frame PNG from stream {fwd_stream} (--no-render mode)")
+        
         try:
+            # Build file mappings - skip output file (MP4/PNG) if no_render is enabled
             file_mappings = [
-                (f"{out_stem}_s{fwd_stream}.mp4", f"{out_stem}.mp4"),
                 (f"{out_stem}_s{fwd_stream}.gpx", f"{out_stem}.gpx"),
                 (f"{out_stem}_s{fwd_stream}_motion.txt", f"{out_stem}_motion.txt"),
                 (f"{out_stem}_s{fwd_stream}_gps.txt", f"{out_stem}_gps.txt"),
-            ][int(no_render):]
+            ]
+            # Only include output file if we're actually rendering (not just processing)
+            if not no_render:
+                file_mappings.insert(0, (f"{out_stem}_s{fwd_stream}.mp4", f"{out_stem}.mp4"))
+            
             for src, dst in file_mappings:
                 shutil.move(src, dst)
             print(f"Renamed files from stream {fwd_stream} to final output")
@@ -150,6 +187,7 @@ Examples:
   %(prog)s ./input ./output --gyroflow-cmd ./gyroflow               # Use custom gyroflow path
   %(prog)s ./input ./output --keep-backward                         # Keep backward-looking streams
   %(prog)s ./input ./output --no-render                             # Process without rendering video
+  %(prog)s ./input ./output --crop-gpx                              # Crop GPX export to video time range
 """
 
 
@@ -200,7 +238,11 @@ def parse_arguments():
                         help="Keep backward-looking video streams instead of deleting them")
     parser.add_argument("--no-render",
                         action="store_true",
-                        help="Process files without rendering video output (dry run)")
+                        help="Process files with minimal rendering (renders only first frame as PNG). "
+                             "Still generates GPS sync, motion reports, and GPX exports, but skips full video rendering.")
+    parser.add_argument("--crop-gpx",
+                        action="store_true",
+                        help="Crop GPX export to video time range, starting at video creation time")
     return parser.parse_args()
 
 
@@ -226,7 +268,7 @@ def main():
     # Process each directory that has matching videos
     for rec_dir in sorted(directories_to_process):
         process_directory(rec_dir, output_root_abs, args.gyroflow_cmd, DEFAULT_PRESET,
-                          args.keep_backward, args.no_render)
+                          args.keep_backward, args.no_render, args.crop_gpx)
 
     print("Batch processing completed!")
 
