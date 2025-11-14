@@ -242,9 +242,14 @@ MenuItem {
         }
         Row {
             anchors.horizontalCenter: parent.horizontalCenter;
+            spacing: 10 * dpiScale;
             LinkButton {
-                text: qsTr("Export synchronized GPX");
+                text: qsTr("Export GPX");
                 onClicked: root.showExportDialog("gpx", "gpx");
+            }
+            LinkButton {
+                text: qsTr("Export cropped GPX");
+                onClicked: root.showExportDialog("gpx", "gpx-fitted");
             }
         }
         Label {
@@ -626,7 +631,9 @@ MenuItem {
         property var exportData: ({});
         onAccepted: {
             if (exportData === "gpx") {
-                controller.export_synchronized_gpx(selectedFile);
+                controller.export_gpx(selectedFile, false);
+            } else if (exportData === "gpx-fitted") {
+                controller.export_gpx(selectedFile, true);
             } else if (exportData === "waypoints-with-timestamps") {
                 controller.export_gps_sampling_waypoints_with_timestamps(selectedFile);
             }

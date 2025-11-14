@@ -122,9 +122,13 @@ struct Opts {
     #[argh(option)]
     input_gpx: Option<String>,
 
-    /// export synchronized GPX file to specified path
+    /// export GPX file to specified path
     #[argh(option)]
     export_gpx: Option<String>,
+
+    /// crop GPX export to video time range, starting at video creation time
+    #[argh(switch)]
+    crop_gpx: bool,
 
     /// create GPS synchronization report file at specified path; contains offset, error, and correlation information (requires --export-gpx)
     #[argh(option)]
@@ -401,28 +405,33 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                         }
                     }
                     if ok {
-                        // Export synchronized GPX if requested
+                        // Export GPX if requested
                         if let Some(ref export_gpx_path) = opts.export_gpx {
                             if let Some(stab) = queue.get_stab_for_job(*job_id) {
-                                log::info!("[{:08x}] Exporting synchronized GPX to: {}", job_id, export_gpx_path);
                                 let gps = stab.gps.read();
                                 if let Some(track) = gps.track.as_ref() {
-                                    let video_start_time = stab.params.read().video_created_at.unwrap_or(0) as f64;
-                                    let offset = gps.offset_ms / 1000.0;
+                                    let params = stab.params.read();
+                                    let video_start_time = params.video_created_at.unwrap_or(0) as f64;
+                                    let offset_s = gps.offset_ms / 1000.0;
+                                    let duration_s = params.duration_ms / 1000.0;
+                                    
+                                    log::info!("[{:08x}] Exporting GPX to: {}", job_id, export_gpx_path);
                                     if std::path::Path::new(export_gpx_path).exists() && !opts.overwrite {
                                         log::error!("[{:08x}] GPX file {} already exists. Use --overwrite to overwrite it.", job_id, export_gpx_path);
                                     } else {
-                                        match gyroflow_core::gps::save_gpx_file(export_gpx_path, video_start_time + offset, track) {
-                                            Ok(_) => log::info!("[{:08x}] GPX exported successfully", job_id),
-                                            Err(e) => log::error!("[{:08x}] Failed to export GPX: {}", job_id, e),
+                                        match gyroflow_core::gps::prepare_gpx_export(track, offset_s, duration_s, opts.crop_gpx) {
+                                            Ok(export_track) => match gyroflow_core::gps::save_gpx_file(export_gpx_path, video_start_time + offset_s, &export_track) {
+                                                Ok(_) => log::info!("[{:08x}] GPX exported successfully", job_id),
+                                                Err(e) => log::error!("[{:08x}] Failed to export GPX: {}", job_id, e),
+                                            },
+                                            Err(_) => log::warn!("[{:08x}] No GPS points in video time range, cannot export GPX", job_id),
                                         }
                                     }
-
+                                    
                                     // Create GPS synchronization report if requested
                                     if let Some(ref report_path) = opts.report_gps {
                                         let sync_result = gps.sync_result.as_ref();
                                         // Report effective offset matching GUI (gps.offset_ms), not raw result.time_offset_s
-                                        let offset_s = gps.offset_ms / 1000.0;
                                         let error = sync_result.map(|r| r.error).unwrap_or(0.0);
                                         let correlation = sync_result.map(|r| r.correlation).unwrap_or(0.0);
                                         let course_range_deg = sync_result.map(|r| r.course_range_deg).unwrap_or(0.0);

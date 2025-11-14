@@ -10,7 +10,7 @@ pub mod sampling;
 
 // Re-export commonly used types
 pub use data::{TrackPoint, GpsTrack};
-pub use io::{parse_gpx_from_str, parse_gpx_file, save_gpx_file, save_waypoints_with_timestamps_csv};
+pub use io::{parse_gpx_from_str, parse_gpx_file, save_gpx_file, prepare_gpx_export, save_waypoints_with_timestamps_csv};
 pub use processing::{
     haversine_distance_m,
     initial_bearing_deg,

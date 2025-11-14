@@ -186,6 +186,7 @@ gyroflow video.mp4 \
   -p '{ "output_path": "/outputs/stabilized.mp4" }' \
   --overwrite \
   --export-gpx /outputs/synchronized.gpx \
+  --crop-gpx \
   --report-gps /outputs/gps_report.txt \
   --stream 0
 ```
@@ -193,8 +194,8 @@ gyroflow video.mp4 \
 This will:
 1. Load the GPX track file (`--input-gpx track.gpx`)
 2. Synchronize the GPS data using the processed motion direction and provided GPS settings
-3. Export the synchronized GPX file (`--export-gpx synchronized.gpx`)
-4. Create a GPS synchronization report with offset, error, correlation, and course range information (`--report-gps <path>`, requires `--export-gpx`)
+3. Export the synchronized GPX file (`--export-gpx synchronized.gpx`). Use `--crop-gpx` to crop the export to the video time range starting at video creation time.
+4. Create a GPS synchronization report with offset, error, correlation, and course range information (`--report-gps <path>`, available with `--export-gpx`)
 5. Use the first video stream (`--stream 0`)
 
 
@@ -234,8 +235,9 @@ instead of `distance-interval` and `sampling-min-speed`.
 
 - `--input-gpx <file>`: Load GPX track file for synchronization
 - `--export-gpx <path>`: Export synchronized GPX file
+- `--crop-gpx`: Crop GPX export to video time range, starting at video creation time (requires `--export-gpx`)
 - `--gps-settings <json>`: GPS synchronization settings (sync_mode, use_processed_motion, speed_threshold, max_time_offset_s, sample_rate_hz)
-- `--report-gps <path>`: Generate GPS synchronization report with offset, error, correlation, and course range information
+- `--report-gps <path>`: Generate GPS synchronization report with offset, error, correlation, and course range information (available with `--export-gpx`)
 
 #### GPS waypoint-based frame sampling
 

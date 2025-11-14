@@ -118,6 +118,36 @@ pub fn save_gpx_file<P: AsRef<Path>>(path: P, time_offset: f64, track: &GpsTrack
     Ok(())
 }
 
+/// Prepare GPS track for export (synchronized or cropped).
+/// 
+/// For cropped exports, the track is cropped to the video duration.
+/// The caller should export with `video_start_time + offset_s` as the time offset.
+/// 
+/// # Arguments
+/// * `track` - The GPS track (timestamps relative to video start)
+/// * `offset_s` - GPS synchronization offset in seconds
+/// * `duration_s` - Video duration in seconds
+/// * `cropped` - Whether to crop (fit) the track to start time and duration
+pub fn prepare_gpx_export(
+    track: &GpsTrack,
+    offset_s: f64,
+    duration_s: f64,
+    fitted: bool,
+) -> Result<GpsTrack, crate::GyroflowCoreError> {
+    if fitted {
+        // Crop track starting from -offset (which corresponds to video start time in synchronized timeline)
+        // When exported with video_start_time + offset, the first point will be at video_start_time
+        let fitted_track = track.fit_to_time_range(-offset_s, duration_s, true, false);
+        if fitted_track.is_empty() {
+            return Err(crate::GyroflowCoreError::InvalidData);
+        }
+        Ok(fitted_track)
+    } else {
+        // When exporting synchronized GPX, we apply the offset to get back to absolute epoch time
+        Ok(track.clone())
+    }
+}
+
 /// Save waypoints with timestamps to CSV.
 /// Each row contains: latitude, longitude, time_ms, time_iso8601.
 /// Timestamps are expected to already be adjusted by video creation time.

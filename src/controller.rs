@@ -326,7 +326,7 @@ pub struct Controller {
 
     // GNSS
     load_gpx: qt_method!(fn(&self, url: QUrl)),
-    export_synchronized_gpx: qt_method!(fn(&self, url: QUrl)),
+    export_gpx: qt_method!(fn(&self, url: QUrl, cropped: bool)),
     export_gps_sampling_waypoints_with_timestamps: qt_method!(fn(&self, url: QUrl)),
     get_gpx_summary: qt_method!(fn(&self) -> QJsonObject),
     gps_sync_mode: qt_property!(i32; READ get_gps_sync_mode WRITE set_gps_sync_mode NOTIFY gps_changed),
@@ -1777,7 +1777,7 @@ impl Controller {
             }
         }
     }
-    fn export_synchronized_gpx(&self, url: QUrl) {
+    fn export_gpx(&self, url: QUrl, fitted: bool) {
         let url = util::qurl_to_encoded(url);
         if url.is_empty() { return; }
         
@@ -1786,12 +1786,23 @@ impl Controller {
             self.error(QString::from("An error occured: %1"), QString::from("No GPS track loaded"), QString::default());
             return;
         };
-        let video_start_time = self.stabilizer.params.read().video_created_at.unwrap_or(0) as f64;
-        // When exporting synchronized GPX, we apply the offset to get back to absolute epoch time
-        // This way, when the GPX is loaded again, the synchronization is preserved in the timestamps
+        
+        let (video_start_time, duration_s) = {
+            let params = self.stabilizer.params.read();
+            (params.video_created_at.unwrap_or(0) as f64, params.duration_ms / 1000.0)
+        };
         let offset = gps_source.offset_ms / 1000.0;
+        
+        let export_track = match gyroflow_core::gps::prepare_gpx_export(track, offset, duration_s, fitted) {
+            Ok(track) => track,
+            Err(_) => {
+                self.error(QString::from("An error occured: %1"), QString::from("No GPS points in video time range"), QString::default());
+                return;
+            }
+        };
+        
         let file_path = filesystem::url_to_path(&url);
-        if let Err(err) = gyroflow_core::gps::save_gpx_file(&file_path, video_start_time + offset, track) {
+        if let Err(err) = gyroflow_core::gps::save_gpx_file(&file_path, video_start_time + offset, &export_track) {
             self.error(QString::from("An error occured: %1"), QString::from(err.to_string()), QString::default());
         }
     }
