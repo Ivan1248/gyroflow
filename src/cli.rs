@@ -319,6 +319,10 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
                 if let Some(sync) = parsed_preset.get("synchronization") {
                     gyroflow_core::util::merge_json(additional_data.get_mut("synchronization").unwrap(), sync);
                 }
+                // Merge frame_schedule from preset into additional_data (needed for explicit timestamps)
+                if let Some(frame_schedule) = parsed_preset.get("frame_schedule") {
+                    additional_data.as_object_mut().unwrap().insert("frame_schedule".into(), frame_schedule.clone());
+                }
             }
         }
 
