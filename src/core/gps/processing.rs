@@ -150,16 +150,16 @@ pub fn compute_pruned_cumulative_distance(times_s: &[f64], lat: &[f64], lon: &[f
 
 /// Find track times (seconds) where cumulative distance crosses multiples of `step_m`.
 /// Assumes `cumdist_m` and `times_s` are same-length arrays, monotonically non-decreasing.
+/// The point at distance 0 is always returned..
 pub fn find_distance_crossings(cumdist_m: &[f64], times_s: &[f64], step_m: f64) -> Vec<f64> {
     let n = cumdist_m.len().min(times_s.len());
     if n == 0 || step_m <= 0.0 { return vec![]; }
     if n == 1 { return vec![]; }
 
     let total = cumdist_m[n - 1];
-    if total < step_m { return vec![]; }
 
     let mut out: Vec<f64> = Vec::new();
-    let mut target = step_m;
+    let mut target = 0.0;
 
     let mut i = 0usize;
     while i + 1 < n && target <= total {

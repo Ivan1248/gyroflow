@@ -302,7 +302,6 @@ MenuItem {
                 unit: "m";
                 precision: 1;
                 from: 1.0;
-                to: 1000.0;
                 value: 10.0;
                 width: parent.width;
                 tooltip: qsTr("Distance interval for frame sampling.");

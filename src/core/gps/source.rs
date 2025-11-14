@@ -302,7 +302,7 @@ impl GpsSource {
 
         // Compute cumulative distance with low-speed pruning
         let cum = compute_pruned_cumulative_distance(&track.time, &track.lat, &track.lon, min_speed);
-        if cum.is_empty() || cum[cum.len() - 1] < step_m { return vec![]; }
+        if cum.is_empty() { return vec![]; }
 
         // Find crossing times in seconds (track time base: seconds since video creation time)
         let crossing_times_s = find_distance_crossings(&cum, &track.time, step_m);
