@@ -195,7 +195,7 @@ This will:
 1. Load the GPX track file (`--input-gpx track.gpx`)
 2. Synchronize the GPS data using the processed motion direction and provided GPS settings
 3. Export the synchronized GPX file (`--export-gpx synchronized.gpx`). Use `--crop-gpx` to crop the export to the video time range starting at video creation time.
-4. Create a GPS synchronization report with offset, error, correlation, and course range information (`--report-gps <path>`, available with `--export-gpx`)
+4. Create a GPS synchronization report with offset, L1 error, correlation, and course range information (`--report-gps <path>`, available with `--export-gpx`)
 5. Use the first video stream (`--stream 0`)
 
 
